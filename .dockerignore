@@ -1,0 +1,15 @@
+build/
+.git/
+.gitignore
+*.md
+Makefile
+.env
+.env.local
+logs/
+tmp/
+temp/
+certs/*.key
+certs/*.crt
+.honeybee_totp_secret
+configs/*.local.yaml
+

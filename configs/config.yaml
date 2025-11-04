@@ -1,0 +1,62 @@
+# HoneyBee Node Configuration
+
+node:
+  # Node name (defaults to hostname if not specified)
+  name: "honeybee-node-01"
+  
+  # Node type: "Full" or "Agent"
+  # Full: Full-featured honeypot with interactive deception
+  # Agent: Lightweight monitoring probe
+  type: "Agent"
+  
+  # Address and port to report to manager
+  address: "0.0.0.0"
+  port: 8080
+
+server:
+  # Manager server address
+  address: "127.0.0.1:9001"
+  
+  # Heartbeat interval in seconds
+  heartbeat_interval: 30
+  
+  # Reconnect delay in seconds
+  reconnect_delay: 5
+  
+  # Connection timeout in seconds
+  connection_timeout: 10
+
+tls:
+  # Enable TLS encryption (highly recommended for production)
+  enabled: true
+  
+  # Client certificate and key for mutual TLS (optional)
+  # cert_file: "certs/client.crt"
+  # key_file: "certs/client.key"
+  
+  # CA certificate for server verification (optional)
+  # ca_file: "certs/ca.crt"
+  
+  # Skip TLS verification (NOT recommended for production)
+  insecure_skip_verify: false
+  
+  # Server name for TLS verification
+  server_name: "honeybee-manager"
+
+auth:
+  # Enable TOTP authentication
+  totp_enabled: true
+  
+  # Directory to store TOTP secret (defaults to ~/.config/honeybee)
+  # totp_secret_dir: "/etc/honeybee/secrets"
+
+log:
+  # Log level: debug, info, warn, error
+  level: "info"
+  
+  # Log format: text or json
+  format: "text"
+  
+  # Log file path (optional, logs to stdout if not specified)
+  # file: "/var/log/honeybee/node.log"
+
