@@ -72,7 +72,7 @@ server:
   address: "manager.example.com:9001"
 
 tls:
-  enabled: true  # ⚠️ Always true in production
+  enabled: false  # ⚠️ Always true in production
   ca_file: "/path/to/ca.crt"
 
 auth:

@@ -1,0 +1,19 @@
+node:
+    name: DELL
+    type: Agent
+    address: 0.0.0.0
+    port: 8080
+server:
+    address: 192.168.1.3:9001
+    heartbeat_interval: 30
+    reconnect_delay: 5
+    connection_timeout: 10
+tls:
+    enabled: false
+    insecure_skip_verify: false
+    server_name: honeybee-manager
+auth:
+    totp_enabled: true
+log:
+    level: info
+    format: text

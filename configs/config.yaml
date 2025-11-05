@@ -15,7 +15,7 @@ node:
 
 server:
   # Manager server address
-  address: "127.0.0.1:9001"
+  address: "192.168.1.3:9001"
   
   # Heartbeat interval in seconds
   heartbeat_interval: 30
@@ -28,7 +28,7 @@ server:
 
 tls:
   # Enable TLS encryption (highly recommended for production)
-  enabled: true
+  enabled: false
   
   # Client certificate and key for mutual TLS (optional)
   # cert_file: "certs/client.crt"
