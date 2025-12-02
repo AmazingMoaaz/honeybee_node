@@ -13,23 +13,25 @@ import (
 
 	"github.com/honeybee/node/internal/auth"
 	"github.com/honeybee/node/internal/config"
+	"github.com/honeybee/node/internal/honeypot"
 	"github.com/honeybee/node/internal/logger"
 	"github.com/honeybee/node/internal/protocol"
 )
 
 // NodeClient manages the connection to the honeybee_core manager
 type NodeClient struct {
-	cfg        *config.Config
-	nodeID     uint64
-	totpMgr    *auth.TOTPManager
-	tlsConfig  *tls.Config
-	conn       net.Conn
-	writer     *bufio.Writer
-	reader     *bufio.Reader
-	mu         sync.Mutex
-	stopChan   chan struct{}
-	doneChan   chan struct{}
-	registered bool
+	cfg            *config.Config
+	nodeID         uint64
+	totpMgr        *auth.TOTPManager
+	tlsConfig      *tls.Config
+	conn           net.Conn
+	writer         *bufio.Writer
+	reader         *bufio.Reader
+	mu             sync.Mutex
+	stopChan       chan struct{}
+	doneChan       chan struct{}
+	registered     bool
+	honeypotMgr    *honeypot.HoneypotManager
 }
 
 // NewNodeClient creates a new node client
@@ -65,13 +67,23 @@ func NewNodeClient(cfg *config.Config) (*NodeClient, error) {
 		}
 	}
 
+	// Initialize honeypot manager if enabled
+	var honeypotMgr *honeypot.HoneypotManager
+	if cfg.Honeypot.Enabled {
+		honeypotMgr, err = honeypot.NewHoneypotManager(cfg.Honeypot.BaseDir, nodeID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize honeypot manager: %w", err)
+		}
+	}
+
 	return &NodeClient{
-		cfg:       cfg,
-		nodeID:    nodeID,
-		totpMgr:   totpMgr,
-		tlsConfig: tlsConfig,
-		stopChan:  make(chan struct{}),
-		doneChan:  make(chan struct{}),
+		cfg:         cfg,
+		nodeID:      nodeID,
+		totpMgr:     totpMgr,
+		tlsConfig:   tlsConfig,
+		stopChan:    make(chan struct{}),
+		doneChan:    make(chan struct{}),
+		honeypotMgr: honeypotMgr,
 	}, nil
 }
 
@@ -85,10 +97,22 @@ func (nc *NodeClient) Run() error {
 		"node_type": nc.cfg.Node.Type,
 	}).Info("Starting node client")
 
+	// Start honeypot manager if enabled
+	if nc.honeypotMgr != nil {
+		if err := nc.honeypotMgr.Start(); err != nil {
+			logger.Errorf("Failed to start honeypot manager: %v", err)
+		} else {
+			logger.Info("Honeypot manager started")
+		}
+	}
+
 	for {
 		select {
 		case <-nc.stopChan:
 			logger.Info("Node client shutting down")
+			if nc.honeypotMgr != nil {
+				nc.honeypotMgr.Stop()
+			}
 			return nil
 		default:
 		}
@@ -285,6 +309,12 @@ func (nc *NodeClient) eventLoop() error {
 	// Start message reader
 	go nc.readMessages(errorChan)
 
+	// Get honeypot event channel if available
+	var honeypotEvents <-chan *protocol.HoneypotEvent
+	if nc.honeypotMgr != nil {
+		honeypotEvents = nc.honeypotMgr.EventChannel()
+	}
+
 	// Main loop
 	for {
 		select {
@@ -297,6 +327,13 @@ func (nc *NodeClient) eventLoop() error {
 				return fmt.Errorf("heartbeat failed: %w", err)
 			}
 			logger.Debug("Heartbeat sent")
+
+		case event, ok := <-honeypotEvents:
+			if ok && event != nil {
+				if err := nc.sendHoneypotEvent(event); err != nil {
+					logger.Errorf("Failed to send honeypot event: %v", err)
+				}
+			}
 
 		case err := <-errorChan:
 			return err
@@ -362,7 +399,87 @@ func (nc *NodeClient) handleMessage(envelope *protocol.MessageEnvelope) error {
 		}
 	}
 
+	// Handle InstallHoneypot command
+	if cmd := envelope.Message.InstallHoneypot; cmd != nil {
+		logger.Infof("Received InstallHoneypot command: %s from %s", cmd.HoneypotID, cmd.GitURL)
+		nc.handleInstallHoneypot(cmd)
+	}
+
+	// Handle StartHoneypot command
+	if cmd := envelope.Message.StartHoneypot; cmd != nil {
+		logger.Infof("Received StartHoneypot command: %s", cmd.HoneypotID)
+		nc.handleStartHoneypot(cmd)
+	}
+
+	// Handle StopHoneypot command
+	if cmd := envelope.Message.StopHoneypot; cmd != nil {
+		logger.Infof("Received StopHoneypot command: %s", cmd.HoneypotID)
+		nc.handleStopHoneypot(cmd)
+	}
+
 	return nil
+}
+
+// handleInstallHoneypot handles the InstallHoneypot command
+func (nc *NodeClient) handleInstallHoneypot(cmd *protocol.InstallHoneypotCmd) {
+	if nc.honeypotMgr == nil {
+		logger.Error("Honeypot manager not enabled")
+		nc.sendEvent(protocol.NewErrorEvent("Honeypot manager not enabled"))
+		return
+	}
+
+	// Set default ports from config if not specified
+	if cmd.SSHPort == 0 {
+		cmd.SSHPort = nc.cfg.Honeypot.DefaultSSH
+	}
+	if cmd.TelnetPort == 0 {
+		cmd.TelnetPort = nc.cfg.Honeypot.DefaultTel
+	}
+
+	if err := nc.honeypotMgr.InstallHoneypot(cmd); err != nil {
+		logger.Errorf("Failed to install honeypot: %v", err)
+		nc.sendEvent(protocol.NewErrorEvent(fmt.Sprintf("Failed to install honeypot: %v", err)))
+	}
+}
+
+// handleStartHoneypot handles the StartHoneypot command
+func (nc *NodeClient) handleStartHoneypot(cmd *protocol.StartHoneypotCmd) {
+	if nc.honeypotMgr == nil {
+		logger.Error("Honeypot manager not enabled")
+		nc.sendEvent(protocol.NewErrorEvent("Honeypot manager not enabled"))
+		return
+	}
+
+	if err := nc.honeypotMgr.StartHoneypot(cmd.HoneypotID); err != nil {
+		logger.Errorf("Failed to start honeypot: %v", err)
+		nc.sendEvent(protocol.NewErrorEvent(fmt.Sprintf("Failed to start honeypot: %v", err)))
+	}
+}
+
+// handleStopHoneypot handles the StopHoneypot command
+func (nc *NodeClient) handleStopHoneypot(cmd *protocol.StopHoneypotCmd) {
+	if nc.honeypotMgr == nil {
+		logger.Error("Honeypot manager not enabled")
+		nc.sendEvent(protocol.NewErrorEvent("Honeypot manager not enabled"))
+		return
+	}
+
+	if err := nc.honeypotMgr.StopHoneypot(cmd.HoneypotID); err != nil {
+		logger.Errorf("Failed to stop honeypot: %v", err)
+		nc.sendEvent(protocol.NewErrorEvent(fmt.Sprintf("Failed to stop honeypot: %v", err)))
+	}
+}
+
+// sendHoneypotEvent sends a honeypot event to the server
+func (nc *NodeClient) sendHoneypotEvent(event *protocol.HoneypotEvent) error {
+	envelope := protocol.MessageEnvelope{
+		Version: protocol.ProtocolVersion,
+		Message: protocol.MessageType{
+			HoneypotEvent: event,
+		},
+	}
+
+	return nc.sendMessage(envelope)
 }
 
 // sendMessage sends a message to the server

@@ -10,11 +10,12 @@ import (
 
 // Config represents the node configuration
 type Config struct {
-	Node   NodeConfig   `yaml:"node"`
-	Server ServerConfig `yaml:"server"`
-	TLS    TLSConfig    `yaml:"tls"`
-	Auth   AuthConfig   `yaml:"auth"`
-	Log    LogConfig    `yaml:"log"`
+	Node     NodeConfig     `yaml:"node"`
+	Server   ServerConfig   `yaml:"server"`
+	TLS      TLSConfig      `yaml:"tls"`
+	Auth     AuthConfig     `yaml:"auth"`
+	Log      LogConfig      `yaml:"log"`
+	Honeypot HoneypotConfig `yaml:"honeypot"`
 }
 
 // NodeConfig defines node-specific settings
@@ -54,6 +55,14 @@ type LogConfig struct {
 	Level  string `yaml:"level"`  // debug, info, warn, error
 	Format string `yaml:"format"` // text, json
 	File   string `yaml:"file,omitempty"`
+}
+
+// HoneypotConfig defines honeypot management settings
+type HoneypotConfig struct {
+	Enabled    bool   `yaml:"enabled"`             // Enable honeypot management
+	BaseDir    string `yaml:"base_dir,omitempty"`  // Base directory for honeypot installations
+	DefaultSSH uint16 `yaml:"default_ssh_port"`    // Default SSH honeypot port
+	DefaultTel uint16 `yaml:"default_telnet_port"` // Default Telnet honeypot port
 }
 
 // LoadConfig loads configuration from a file
@@ -107,10 +116,14 @@ func DefaultConfig() *Config {
 		hostname = "honeybee-node"
 	}
 
+	// Default honeypot directory
+	homeDir, _ := os.UserHomeDir()
+	honeypotDir := filepath.Join(homeDir, ".honeybee", "honeypots")
+
 	return &Config{
 		Node: NodeConfig{
 			Name:    hostname,
-			Type:    "Agent",
+			Type:    "Full", // Default to Full for honeypot management
 			Address: "0.0.0.0",
 			Port:    8080,
 		},
@@ -131,6 +144,12 @@ func DefaultConfig() *Config {
 		Log: LogConfig{
 			Level:  "info",
 			Format: "text",
+		},
+		Honeypot: HoneypotConfig{
+			Enabled:    true,
+			BaseDir:    honeypotDir,
+			DefaultSSH: 2222,
+			DefaultTel: 2223,
 		},
 	}
 }

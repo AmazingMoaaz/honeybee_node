@@ -5,9 +5,9 @@ node:
   name: "honeybee-node-01"
   
   # Node type: "Full" or "Agent"
-  # Full: Full-featured honeypot with interactive deception
+  # Full: Full-featured honeypot node that can install and manage honeypots
   # Agent: Lightweight monitoring probe
-  type: "Agent"
+  type: "Full"
   
   # Address and port to report to manager
   address: "0.0.0.0"
@@ -59,4 +59,53 @@ log:
   
   # Log file path (optional, logs to stdout if not specified)
   # file: "/var/log/honeybee/node.log"
+
+# =============================================================================
+# Honeypot Management Configuration
+# =============================================================================
+honeypot:
+  # Enable honeypot management capabilities
+  # When enabled, this node can install, start, stop, and manage honeypots
+  enabled: true
+  
+  # Base directory for honeypot installations
+  # Each honeypot is installed in a subdirectory (e.g., base_dir/cowrie-01/)
+  base_dir: "~/.honeybee/honeypots"
+  
+  # Default SSH honeypot port (used when not specified in install command)
+  default_ssh_port: 2222
+  
+  # Default Telnet honeypot port (used when not specified in install command)
+  default_telnet_port: 2223
+
+# =============================================================================
+# Example: Installing Cowrie from GitHub
+# =============================================================================
+# After the node is running and connected to the manager, you can send an
+# InstallHoneypot command from the manager:
+#
+# {
+#   "version": 2,
+#   "message": {
+#     "InstallHoneypot": {
+#       "honeypot_id": "cowrie-01",
+#       "honeypot_type": "cowrie",
+#       "git_url": "https://github.com/cowrie/cowrie.git",
+#       "git_branch": "main",
+#       "ssh_port": 2222,
+#       "telnet_port": 2223,
+#       "auto_start": true
+#     }
+#   }
+# }
+#
+# The node will:
+# 1. Clone Cowrie from the GitHub URL
+# 2. Create a Python virtual environment
+# 3. Install dependencies
+# 4. Configure Cowrie with HoneyBee integration (socketlog output)
+# 5. Optionally start Cowrie automatically
+#
+# All honeypot events (login attempts, commands, etc.) will be forwarded
+# to the HoneyBee Core manager in real-time.
 

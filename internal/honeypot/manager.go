@@ -1,0 +1,608 @@
+package honeypot
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"sync"
+	"time"
+
+	"github.com/honeybee/node/internal/logger"
+	"github.com/honeybee/node/internal/protocol"
+)
+
+// HoneypotManager manages honeypot installations and lifecycle
+type HoneypotManager struct {
+	baseDir       string
+	honeypots     map[string]*HoneypotInstance
+	mu            sync.RWMutex
+	eventChan     chan *protocol.HoneypotEvent
+	nodeID        uint64
+	eventListener net.Listener
+	listenerPort  int
+	ctx           context.Context
+	cancel        context.CancelFunc
+}
+
+// HoneypotInstance represents a single honeypot installation
+type HoneypotInstance struct {
+	ID          string
+	Type        string
+	GitURL      string
+	InstallPath string
+	Status      protocol.HoneypotStatus
+	SSHPort     uint16
+	TelnetPort  uint16
+	Process     *exec.Cmd
+	cancelFunc  context.CancelFunc
+	mu          sync.Mutex
+}
+
+// NewHoneypotManager creates a new honeypot manager
+func NewHoneypotManager(baseDir string, nodeID uint64) (*HoneypotManager, error) {
+	// Create base directory if it doesn't exist
+	if err := os.MkdirAll(baseDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create honeypot base directory: %w", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	return &HoneypotManager{
+		baseDir:   baseDir,
+		honeypots: make(map[string]*HoneypotInstance),
+		eventChan: make(chan *protocol.HoneypotEvent, 1000),
+		nodeID:    nodeID,
+		ctx:       ctx,
+		cancel:    cancel,
+	}, nil
+}
+
+// Start starts the honeypot manager and event listener
+func (hm *HoneypotManager) Start() error {
+	// Start the event listener for receiving honeypot events via socket
+	if err := hm.startEventListener(); err != nil {
+		return fmt.Errorf("failed to start event listener: %w", err)
+	}
+
+	logger.Infof("HoneypotManager started, event listener on port %d", hm.listenerPort)
+	return nil
+}
+
+// Stop stops all honeypots and the manager
+func (hm *HoneypotManager) Stop() {
+	hm.cancel()
+
+	// Stop all honeypots
+	hm.mu.RLock()
+	for _, hp := range hm.honeypots {
+		hm.stopHoneypot(hp)
+	}
+	hm.mu.RUnlock()
+
+	// Close event listener
+	if hm.eventListener != nil {
+		hm.eventListener.Close()
+	}
+
+	close(hm.eventChan)
+	logger.Info("HoneypotManager stopped")
+}
+
+// EventChannel returns the channel for honeypot events
+func (hm *HoneypotManager) EventChannel() <-chan *protocol.HoneypotEvent {
+	return hm.eventChan
+}
+
+// InstallHoneypot installs a honeypot from a Git repository
+func (hm *HoneypotManager) InstallHoneypot(cmd *protocol.InstallHoneypotCmd) error {
+	hm.mu.Lock()
+	defer hm.mu.Unlock()
+
+	// Check if honeypot already exists
+	if _, exists := hm.honeypots[cmd.HoneypotID]; exists {
+		return fmt.Errorf("honeypot %s already exists", cmd.HoneypotID)
+	}
+
+	installPath := filepath.Join(hm.baseDir, cmd.HoneypotID)
+
+	instance := &HoneypotInstance{
+		ID:          cmd.HoneypotID,
+		Type:        cmd.HoneypotType,
+		GitURL:      cmd.GitURL,
+		InstallPath: installPath,
+		Status:      protocol.HoneypotStatusInstalling,
+		SSHPort:     cmd.SSHPort,
+		TelnetPort:  cmd.TelnetPort,
+	}
+
+	// Set default ports
+	if instance.SSHPort == 0 {
+		instance.SSHPort = 2222
+	}
+	if instance.TelnetPort == 0 {
+		instance.TelnetPort = 2223
+	}
+
+	hm.honeypots[cmd.HoneypotID] = instance
+
+	// Install honeypot in background
+	go hm.installHoneypotAsync(instance, cmd)
+
+	return nil
+}
+
+// installHoneypotAsync performs the actual installation asynchronously
+func (hm *HoneypotManager) installHoneypotAsync(instance *HoneypotInstance, cmd *protocol.InstallHoneypotCmd) {
+	logger.Infof("Installing honeypot %s from %s", instance.ID, instance.GitURL)
+
+	// Send installing status
+	hm.sendStatusUpdate(instance, "Installing from Git repository...")
+
+	// Clone the repository
+	branch := cmd.GitBranch
+	if branch == "" {
+		branch = "main"
+	}
+
+	gitArgs := []string{"clone", "--depth", "1", "--branch", branch, instance.GitURL, instance.InstallPath}
+	gitCmd := exec.CommandContext(hm.ctx, "git", gitArgs...)
+	gitCmd.Stdout = os.Stdout
+	gitCmd.Stderr = os.Stderr
+
+	if err := gitCmd.Run(); err != nil {
+		logger.Errorf("Failed to clone honeypot repository: %v", err)
+		instance.Status = protocol.HoneypotStatusFailed
+		hm.sendStatusUpdate(instance, fmt.Sprintf("Git clone failed: %v", err))
+		return
+	}
+
+	logger.Infof("Cloned honeypot repository to %s", instance.InstallPath)
+
+	// Run honeypot-specific setup
+	if err := hm.setupHoneypot(instance, cmd.Config); err != nil {
+		logger.Errorf("Failed to setup honeypot: %v", err)
+		instance.Status = protocol.HoneypotStatusFailed
+		hm.sendStatusUpdate(instance, fmt.Sprintf("Setup failed: %v", err))
+		return
+	}
+
+	instance.Status = protocol.HoneypotStatusStopped
+	hm.sendStatusUpdate(instance, "Installation complete")
+
+	logger.Infof("Honeypot %s installed successfully", instance.ID)
+
+	// Auto-start if requested
+	if cmd.AutoStart {
+		if err := hm.StartHoneypot(cmd.HoneypotID); err != nil {
+			logger.Errorf("Failed to auto-start honeypot: %v", err)
+		}
+	}
+}
+
+// setupHoneypot performs honeypot-specific setup (virtualenv, config, etc.)
+func (hm *HoneypotManager) setupHoneypot(instance *HoneypotInstance, config map[string]string) error {
+	switch instance.Type {
+	case "cowrie":
+		return hm.setupCowrie(instance, config)
+	default:
+		return fmt.Errorf("unsupported honeypot type: %s", instance.Type)
+	}
+}
+
+// setupCowrie sets up Cowrie honeypot
+func (hm *HoneypotManager) setupCowrie(instance *HoneypotInstance, config map[string]string) error {
+	logger.Info("Setting up Cowrie honeypot...")
+
+	// Determine Python command
+	pythonCmd := "python3"
+	if runtime.GOOS == "windows" {
+		pythonCmd = "python"
+	}
+
+	// Create virtual environment
+	venvPath := filepath.Join(instance.InstallPath, "cowrie-env")
+	venvCmd := exec.CommandContext(hm.ctx, pythonCmd, "-m", "venv", venvPath)
+	venvCmd.Dir = instance.InstallPath
+	if err := venvCmd.Run(); err != nil {
+		return fmt.Errorf("failed to create virtualenv: %w", err)
+	}
+
+	// Determine pip path
+	var pipPath string
+	if runtime.GOOS == "windows" {
+		pipPath = filepath.Join(venvPath, "Scripts", "pip")
+	} else {
+		pipPath = filepath.Join(venvPath, "bin", "pip")
+	}
+
+	// Upgrade pip
+	pipUpgradeCmd := exec.CommandContext(hm.ctx, pipPath, "install", "--upgrade", "pip")
+	pipUpgradeCmd.Dir = instance.InstallPath
+	if err := pipUpgradeCmd.Run(); err != nil {
+		logger.Warnf("Failed to upgrade pip: %v", err)
+	}
+
+	// Install requirements
+	reqPath := filepath.Join(instance.InstallPath, "requirements.txt")
+	if _, err := os.Stat(reqPath); err == nil {
+		pipInstallCmd := exec.CommandContext(hm.ctx, pipPath, "install", "-r", reqPath)
+		pipInstallCmd.Dir = instance.InstallPath
+		pipInstallCmd.Stdout = os.Stdout
+		pipInstallCmd.Stderr = os.Stderr
+		if err := pipInstallCmd.Run(); err != nil {
+			return fmt.Errorf("failed to install requirements: %w", err)
+		}
+	}
+
+	// Install Cowrie itself
+	pipInstallCowrie := exec.CommandContext(hm.ctx, pipPath, "install", "-e", ".")
+	pipInstallCowrie.Dir = instance.InstallPath
+	if err := pipInstallCowrie.Run(); err != nil {
+		logger.Warnf("Failed to install cowrie package: %v (might not be needed)", err)
+	}
+
+	// Create configuration
+	if err := hm.createCowrieConfig(instance, config); err != nil {
+		return fmt.Errorf("failed to create cowrie config: %w", err)
+	}
+
+	// Create necessary directories
+	dirs := []string{
+		filepath.Join(instance.InstallPath, "var", "log", "cowrie"),
+		filepath.Join(instance.InstallPath, "var", "lib", "cowrie", "tty"),
+		filepath.Join(instance.InstallPath, "var", "lib", "cowrie", "downloads"),
+		filepath.Join(instance.InstallPath, "var", "run", "cowrie"),
+	}
+	for _, dir := range dirs {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("failed to create directory %s: %w", dir, err)
+		}
+	}
+
+	return nil
+}
+
+// createCowrieConfig creates the Cowrie configuration file
+func (hm *HoneypotManager) createCowrieConfig(instance *HoneypotInstance, config map[string]string) error {
+	configPath := filepath.Join(instance.InstallPath, "etc", "cowrie.cfg")
+
+	// Ensure etc directory exists
+	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+		return err
+	}
+
+	// Create config content with HoneyBee integration
+	configContent := fmt.Sprintf(`# HoneyBee-managed Cowrie Configuration
+# Honeypot ID: %s
+
+[honeypot]
+hostname = honeybee-%s
+log_path = var/log/cowrie
+download_path = var/lib/cowrie/downloads
+state_path = var/lib/cowrie
+data_path = src/cowrie/data
+contents_path = honeyfs
+backend = shell
+logtype = plain
+timezone = UTC
+
+[ssh]
+enabled = true
+listen_endpoints = tcp:%d:interface=0.0.0.0
+
+[telnet]
+enabled = true
+listen_endpoints = tcp:%d:interface=0.0.0.0
+
+# JSON logging for local storage
+[output_jsonlog]
+enabled = true
+logfile = var/log/cowrie/cowrie.json
+
+# Socket output to HoneyBee Node
+[output_socketlog]
+enabled = true
+address = 127.0.0.1:%d
+timeout = 5
+`, instance.ID, instance.ID, instance.SSHPort, instance.TelnetPort, hm.listenerPort)
+
+	// Apply custom config overrides
+	for key, value := range config {
+		configContent += fmt.Sprintf("\n%s = %s", key, value)
+	}
+
+	return os.WriteFile(configPath, []byte(configContent), 0644)
+}
+
+// StartHoneypot starts a honeypot instance
+func (hm *HoneypotManager) StartHoneypot(honeypotID string) error {
+	hm.mu.Lock()
+	instance, exists := hm.honeypots[honeypotID]
+	hm.mu.Unlock()
+
+	if !exists {
+		return fmt.Errorf("honeypot %s not found", honeypotID)
+	}
+
+	instance.mu.Lock()
+	defer instance.mu.Unlock()
+
+	if instance.Status == protocol.HoneypotStatusRunning {
+		return fmt.Errorf("honeypot %s is already running", honeypotID)
+	}
+
+	switch instance.Type {
+	case "cowrie":
+		return hm.startCowrie(instance)
+	default:
+		return fmt.Errorf("unsupported honeypot type: %s", instance.Type)
+	}
+}
+
+// startCowrie starts the Cowrie honeypot
+func (hm *HoneypotManager) startCowrie(instance *HoneypotInstance) error {
+	logger.Infof("Starting Cowrie honeypot %s", instance.ID)
+
+	// Determine paths
+	var pythonPath string
+	if runtime.GOOS == "windows" {
+		pythonPath = filepath.Join(instance.InstallPath, "cowrie-env", "Scripts", "python")
+	} else {
+		pythonPath = filepath.Join(instance.InstallPath, "cowrie-env", "bin", "python")
+	}
+
+	// Create context for the process
+	ctx, cancel := context.WithCancel(hm.ctx)
+	instance.cancelFunc = cancel
+
+	// Start Cowrie using twistd
+	twistdPath := filepath.Join(filepath.Dir(pythonPath), "twistd")
+	cmd := exec.CommandContext(ctx, twistdPath, "-n", "cowrie")
+	cmd.Dir = instance.InstallPath
+	cmd.Env = append(os.Environ(),
+		fmt.Sprintf("PYTHONPATH=%s", filepath.Join(instance.InstallPath, "src")),
+	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return fmt.Errorf("failed to start cowrie: %w", err)
+	}
+
+	instance.Process = cmd
+	instance.Status = protocol.HoneypotStatusRunning
+	hm.sendStatusUpdate(instance, "Honeypot started")
+
+	// Monitor process in background
+	go func() {
+		err := cmd.Wait()
+		instance.mu.Lock()
+		if instance.Status == protocol.HoneypotStatusRunning {
+			if err != nil {
+				logger.Errorf("Cowrie process exited with error: %v", err)
+				instance.Status = protocol.HoneypotStatusFailed
+				hm.sendStatusUpdate(instance, fmt.Sprintf("Process exited: %v", err))
+			} else {
+				instance.Status = protocol.HoneypotStatusStopped
+				hm.sendStatusUpdate(instance, "Process exited normally")
+			}
+		}
+		instance.mu.Unlock()
+	}()
+
+	logger.Infof("Cowrie honeypot %s started on SSH:%d, Telnet:%d",
+		instance.ID, instance.SSHPort, instance.TelnetPort)
+
+	return nil
+}
+
+// StopHoneypot stops a honeypot instance
+func (hm *HoneypotManager) StopHoneypot(honeypotID string) error {
+	hm.mu.RLock()
+	instance, exists := hm.honeypots[honeypotID]
+	hm.mu.RUnlock()
+
+	if !exists {
+		return fmt.Errorf("honeypot %s not found", honeypotID)
+	}
+
+	return hm.stopHoneypot(instance)
+}
+
+// stopHoneypot stops a specific honeypot instance
+func (hm *HoneypotManager) stopHoneypot(instance *HoneypotInstance) error {
+	instance.mu.Lock()
+	defer instance.mu.Unlock()
+
+	if instance.Status != protocol.HoneypotStatusRunning {
+		return nil
+	}
+
+	logger.Infof("Stopping honeypot %s", instance.ID)
+
+	if instance.cancelFunc != nil {
+		instance.cancelFunc()
+	}
+
+	if instance.Process != nil && instance.Process.Process != nil {
+		instance.Process.Process.Kill()
+	}
+
+	instance.Status = protocol.HoneypotStatusStopped
+	hm.sendStatusUpdate(instance, "Honeypot stopped")
+
+	return nil
+}
+
+// GetStatus returns the status of a honeypot
+func (hm *HoneypotManager) GetStatus(honeypotID string) (*protocol.HoneypotStatusUpdate, error) {
+	hm.mu.RLock()
+	instance, exists := hm.honeypots[honeypotID]
+	hm.mu.RUnlock()
+
+	if !exists {
+		return nil, fmt.Errorf("honeypot %s not found", honeypotID)
+	}
+
+	return &protocol.HoneypotStatusUpdate{
+		NodeID:       hm.nodeID,
+		HoneypotID:   instance.ID,
+		HoneypotType: instance.Type,
+		Status:       instance.Status,
+		SSHPort:      instance.SSHPort,
+		TelnetPort:   instance.TelnetPort,
+	}, nil
+}
+
+// ListHoneypots returns all honeypot instances
+func (hm *HoneypotManager) ListHoneypots() []*protocol.HoneypotStatusUpdate {
+	hm.mu.RLock()
+	defer hm.mu.RUnlock()
+
+	var result []*protocol.HoneypotStatusUpdate
+	for _, instance := range hm.honeypots {
+		result = append(result, &protocol.HoneypotStatusUpdate{
+			NodeID:       hm.nodeID,
+			HoneypotID:   instance.ID,
+			HoneypotType: instance.Type,
+			Status:       instance.Status,
+			SSHPort:      instance.SSHPort,
+			TelnetPort:   instance.TelnetPort,
+		})
+	}
+	return result
+}
+
+// sendStatusUpdate sends a honeypot status update to the event channel
+func (hm *HoneypotManager) sendStatusUpdate(instance *HoneypotInstance, message string) {
+	update := &protocol.HoneypotStatusUpdate{
+		NodeID:       hm.nodeID,
+		HoneypotID:   instance.ID,
+		HoneypotType: instance.Type,
+		Status:       instance.Status,
+		Message:      message,
+		SSHPort:      instance.SSHPort,
+		TelnetPort:   instance.TelnetPort,
+	}
+
+	// Create a HoneypotEvent to carry the status update
+	event := &protocol.HoneypotEvent{
+		NodeID:       hm.nodeID,
+		HoneypotID:   instance.ID,
+		HoneypotType: instance.Type,
+		EventID:      "honeybee.honeypot.status",
+		Timestamp:    time.Now(),
+		Message:      fmt.Sprintf("Status: %s - %s", update.Status, message),
+	}
+
+	select {
+	case hm.eventChan <- event:
+	default:
+		logger.Warn("Event channel full, dropping status update")
+	}
+}
+
+// startEventListener starts a TCP listener for receiving honeypot events
+func (hm *HoneypotManager) startEventListener() error {
+	// Find an available port starting from 9100
+	var listener net.Listener
+	var err error
+	for port := 9100; port < 9200; port++ {
+		listener, err = net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err == nil {
+			hm.listenerPort = port
+			break
+		}
+	}
+	if listener == nil {
+		return fmt.Errorf("failed to find available port for event listener: %w", err)
+	}
+
+	hm.eventListener = listener
+
+	// Start accepting connections
+	go hm.acceptConnections()
+
+	return nil
+}
+
+// acceptConnections accepts incoming connections from honeypots
+func (hm *HoneypotManager) acceptConnections() {
+	for {
+		conn, err := hm.eventListener.Accept()
+		if err != nil {
+			select {
+			case <-hm.ctx.Done():
+				return
+			default:
+				logger.Errorf("Failed to accept connection: %v", err)
+				continue
+			}
+		}
+		go hm.handleConnection(conn)
+	}
+}
+
+// handleConnection handles a single honeypot connection
+func (hm *HoneypotManager) handleConnection(conn net.Conn) {
+	defer conn.Close()
+
+	reader := bufio.NewReader(conn)
+	for {
+		select {
+		case <-hm.ctx.Done():
+			return
+		default:
+		}
+
+		line, err := reader.ReadBytes('\n')
+		if err != nil {
+			return
+		}
+
+		// Parse the JSON event from Cowrie
+		var rawEvent map[string]interface{}
+		if err := json.Unmarshal(line, &rawEvent); err != nil {
+			logger.Warnf("Failed to parse honeypot event: %v", err)
+			continue
+		}
+
+		// Find the honeypot instance this event belongs to
+		honeypotID := hm.findHoneypotForEvent(rawEvent)
+
+		// Create HoneypotEvent
+		event := protocol.NewHoneypotEvent(hm.nodeID, honeypotID, "cowrie", rawEvent)
+
+		// Send to event channel
+		select {
+		case hm.eventChan <- event:
+		default:
+			logger.Warn("Event channel full, dropping honeypot event")
+		}
+	}
+}
+
+// findHoneypotForEvent tries to determine which honeypot an event belongs to
+func (hm *HoneypotManager) findHoneypotForEvent(event map[string]interface{}) string {
+	// Try to get sensor name from event
+	if sensor, ok := event["sensor"].(string); ok {
+		return sensor
+	}
+
+	// Default to first honeypot if only one exists
+	hm.mu.RLock()
+	defer hm.mu.RUnlock()
+
+	for id := range hm.honeypots {
+		return id
+	}
+
+	return "unknown"
+}
