@@ -137,32 +137,84 @@ func (hm *HoneypotManager) InstallHoneypot(cmd *protocol.InstallHoneypotCmd) err
 	return nil
 }
 
+// PotStoreURL is the official HoneyBee PotStore repository
+const PotStoreURL = "https://github.com/H0neyBe/honeybee_potstore.git"
+
 // installHoneypotAsync performs the actual installation asynchronously
 func (hm *HoneypotManager) installHoneypotAsync(instance *HoneypotInstance, cmd *protocol.InstallHoneypotCmd) {
-	logger.Infof("Installing honeypot %s from %s", instance.ID, instance.GitURL)
+	logger.Infof("Installing honeypot %s (type: %s)", instance.ID, instance.Type)
 
 	// Send installing status
-	hm.sendStatusUpdate(instance, "Installing from Git repository...")
+	hm.sendStatusUpdate(instance, "Installing from HoneyBee PotStore...")
 
-	// Clone the repository
+	// Determine source: use custom git_url if provided, otherwise use PotStore
+	gitURL := cmd.GitURL
+	if gitURL == "" {
+		gitURL = PotStoreURL
+	}
+
 	branch := cmd.GitBranch
 	if branch == "" {
 		branch = "main"
 	}
 
-	gitArgs := []string{"clone", "--depth", "1", "--branch", branch, instance.GitURL, instance.InstallPath}
+	// Clone the repository
+	tempPath := instance.InstallPath
+	if gitURL == PotStoreURL {
+		// Clone potstore to temp location, then move honeypot subdirectory
+		tempPath = filepath.Join(hm.baseDir, ".potstore-temp")
+	}
+
+	gitArgs := []string{"clone", "--depth", "1", "--branch", branch, gitURL, tempPath}
 	gitCmd := exec.CommandContext(hm.ctx, "git", gitArgs...)
 	gitCmd.Stdout = os.Stdout
 	gitCmd.Stderr = os.Stderr
 
 	if err := gitCmd.Run(); err != nil {
-		logger.Errorf("Failed to clone honeypot repository: %v", err)
+		logger.Errorf("Failed to clone repository: %v", err)
 		instance.Status = protocol.HoneypotStatusFailed
 		hm.sendStatusUpdate(instance, fmt.Sprintf("Git clone failed: %v", err))
 		return
 	}
 
-	logger.Infof("Cloned honeypot repository to %s", instance.InstallPath)
+	// If using PotStore, move the specific honeypot directory
+	if gitURL == PotStoreURL {
+		honeypotSrcPath := filepath.Join(tempPath, instance.Type)
+		if _, err := os.Stat(honeypotSrcPath); os.IsNotExist(err) {
+			// Try with version suffix (e.g., cowrie-2.9.0)
+			entries, _ := filepath.Glob(filepath.Join(tempPath, instance.Type+"*"))
+			if len(entries) > 0 {
+				honeypotSrcPath = entries[0]
+			} else {
+				logger.Errorf("Honeypot %s not found in PotStore", instance.Type)
+				instance.Status = protocol.HoneypotStatusFailed
+				hm.sendStatusUpdate(instance, fmt.Sprintf("Honeypot %s not found in PotStore", instance.Type))
+				os.RemoveAll(tempPath)
+				return
+			}
+		}
+
+		// Move honeypot to final location
+		if err := os.Rename(honeypotSrcPath, instance.InstallPath); err != nil {
+			// If rename fails (cross-device), try copy
+			cpCmd := exec.CommandContext(hm.ctx, "cp", "-r", honeypotSrcPath, instance.InstallPath)
+			if runtime.GOOS == "windows" {
+				cpCmd = exec.CommandContext(hm.ctx, "xcopy", honeypotSrcPath, instance.InstallPath, "/E", "/I", "/H")
+			}
+			if err := cpCmd.Run(); err != nil {
+				logger.Errorf("Failed to copy honeypot: %v", err)
+				instance.Status = protocol.HoneypotStatusFailed
+				hm.sendStatusUpdate(instance, fmt.Sprintf("Failed to copy honeypot: %v", err))
+				os.RemoveAll(tempPath)
+				return
+			}
+		}
+
+		// Cleanup temp potstore
+		os.RemoveAll(tempPath)
+	}
+
+	logger.Infof("Installed honeypot to %s", instance.InstallPath)
 
 	// Run honeypot-specific setup
 	if err := hm.setupHoneypot(instance, cmd.Config); err != nil {
@@ -190,8 +242,17 @@ func (hm *HoneypotManager) setupHoneypot(instance *HoneypotInstance, config map[
 	switch instance.Type {
 	case "cowrie":
 		return hm.setupCowrie(instance, config)
+	case "dionaea":
+		return hm.setupDionaea(instance, config)
+	case "heralding":
+		return hm.setupHeralding(instance, config)
+	case "elasticpot":
+		return hm.setupElasticpot(instance, config)
+	case "mailoney":
+		return hm.setupMailoney(instance, config)
 	default:
-		return fmt.Errorf("unsupported honeypot type: %s", instance.Type)
+		// Try generic Python honeypot setup
+		return hm.setupGenericPython(instance, config)
 	}
 }
 
@@ -320,6 +381,81 @@ timeout = 5
 	return os.WriteFile(configPath, []byte(configContent), 0644)
 }
 
+// setupDionaea sets up Dionaea honeypot
+func (hm *HoneypotManager) setupDionaea(instance *HoneypotInstance, config map[string]string) error {
+	logger.Info("Setting up Dionaea honeypot...")
+	// Dionaea typically requires compilation, this is a simplified setup
+	return hm.setupGenericPython(instance, config)
+}
+
+// setupHeralding sets up Heralding honeypot
+func (hm *HoneypotManager) setupHeralding(instance *HoneypotInstance, config map[string]string) error {
+	logger.Info("Setting up Heralding honeypot...")
+	return hm.setupGenericPython(instance, config)
+}
+
+// setupElasticpot sets up Elasticpot honeypot
+func (hm *HoneypotManager) setupElasticpot(instance *HoneypotInstance, config map[string]string) error {
+	logger.Info("Setting up Elasticpot honeypot...")
+	return hm.setupGenericPython(instance, config)
+}
+
+// setupMailoney sets up Mailoney honeypot
+func (hm *HoneypotManager) setupMailoney(instance *HoneypotInstance, config map[string]string) error {
+	logger.Info("Setting up Mailoney honeypot...")
+	return hm.setupGenericPython(instance, config)
+}
+
+// setupGenericPython sets up a generic Python-based honeypot
+func (hm *HoneypotManager) setupGenericPython(instance *HoneypotInstance, config map[string]string) error {
+	logger.Infof("Setting up generic Python honeypot: %s", instance.Type)
+
+	// Determine Python command
+	pythonCmd := "python3"
+	if runtime.GOOS == "windows" {
+		pythonCmd = "python"
+	}
+
+	// Create virtual environment
+	venvPath := filepath.Join(instance.InstallPath, "venv")
+	venvCmd := exec.CommandContext(hm.ctx, pythonCmd, "-m", "venv", venvPath)
+	venvCmd.Dir = instance.InstallPath
+	if err := venvCmd.Run(); err != nil {
+		return fmt.Errorf("failed to create virtualenv: %w", err)
+	}
+
+	// Determine pip path
+	var pipPath string
+	if runtime.GOOS == "windows" {
+		pipPath = filepath.Join(venvPath, "Scripts", "pip")
+	} else {
+		pipPath = filepath.Join(venvPath, "bin", "pip")
+	}
+
+	// Upgrade pip
+	pipUpgradeCmd := exec.CommandContext(hm.ctx, pipPath, "install", "--upgrade", "pip")
+	pipUpgradeCmd.Dir = instance.InstallPath
+	pipUpgradeCmd.Run() // Ignore errors
+
+	// Install requirements if exists
+	reqPath := filepath.Join(instance.InstallPath, "requirements.txt")
+	if _, err := os.Stat(reqPath); err == nil {
+		pipInstallCmd := exec.CommandContext(hm.ctx, pipPath, "install", "-r", reqPath)
+		pipInstallCmd.Dir = instance.InstallPath
+		pipInstallCmd.Stdout = os.Stdout
+		pipInstallCmd.Stderr = os.Stderr
+		if err := pipInstallCmd.Run(); err != nil {
+			return fmt.Errorf("failed to install requirements: %w", err)
+		}
+	}
+
+	// Create log directory
+	logDir := filepath.Join(instance.InstallPath, "logs")
+	os.MkdirAll(logDir, 0755)
+
+	return nil
+}
+
 // StartHoneypot starts a honeypot instance
 func (hm *HoneypotManager) StartHoneypot(honeypotID string) error {
 	hm.mu.Lock()
@@ -341,8 +477,75 @@ func (hm *HoneypotManager) StartHoneypot(honeypotID string) error {
 	case "cowrie":
 		return hm.startCowrie(instance)
 	default:
-		return fmt.Errorf("unsupported honeypot type: %s", instance.Type)
+		// Try generic Python start
+		return hm.startGenericPython(instance)
 	}
+}
+
+// startGenericPython starts a generic Python-based honeypot
+func (hm *HoneypotManager) startGenericPython(instance *HoneypotInstance) error {
+	logger.Infof("Starting %s honeypot %s", instance.Type, instance.ID)
+
+	// Determine Python path
+	var pythonPath string
+	if runtime.GOOS == "windows" {
+		pythonPath = filepath.Join(instance.InstallPath, "venv", "Scripts", "python")
+	} else {
+		pythonPath = filepath.Join(instance.InstallPath, "venv", "bin", "python")
+	}
+
+	// Create context for the process
+	ctx, cancel := context.WithCancel(hm.ctx)
+	instance.cancelFunc = cancel
+
+	// Look for common entry points
+	entryPoints := []string{"main.py", "run.py", "server.py", "honeypot.py"}
+	var entryPoint string
+	for _, ep := range entryPoints {
+		epPath := filepath.Join(instance.InstallPath, ep)
+		if _, err := os.Stat(epPath); err == nil {
+			entryPoint = ep
+			break
+		}
+	}
+
+	if entryPoint == "" {
+		cancel()
+		return fmt.Errorf("no entry point found for %s", instance.Type)
+	}
+
+	cmd := exec.CommandContext(ctx, pythonPath, entryPoint)
+	cmd.Dir = instance.InstallPath
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return fmt.Errorf("failed to start %s: %w", instance.Type, err)
+	}
+
+	instance.Process = cmd
+	instance.Status = protocol.HoneypotStatusRunning
+	hm.sendStatusUpdate(instance, fmt.Sprintf("%s honeypot started", instance.Type))
+
+	// Monitor process
+	go func() {
+		err := cmd.Wait()
+		instance.mu.Lock()
+		if instance.Status == protocol.HoneypotStatusRunning {
+			if err != nil {
+				logger.Errorf("%s process exited with error: %v", instance.Type, err)
+				instance.Status = protocol.HoneypotStatusFailed
+				hm.sendStatusUpdate(instance, fmt.Sprintf("Process exited: %v", err))
+			} else {
+				instance.Status = protocol.HoneypotStatusStopped
+				hm.sendStatusUpdate(instance, "Process exited normally")
+			}
+		}
+		instance.mu.Unlock()
+	}()
+
+	return nil
 }
 
 // startCowrie starts the Cowrie honeypot
