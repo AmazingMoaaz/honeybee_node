@@ -15,7 +15,7 @@ node:
 
 server:
   # Manager server address
-  address: "192.168.1.3:9001"
+  address: "10.10.1.3:9001"
   
   # Heartbeat interval in seconds
   heartbeat_interval: 30
@@ -44,8 +44,8 @@ tls:
   server_name: "honeybee-manager"
 
 auth:
-  # Enable TOTP authentication
-  totp_enabled: true
+  # Enable TOTP authentication (disable for testing)
+  totp_enabled: false
   
   # Directory to store TOTP secret (defaults to ~/.config/honeybee)
   # totp_secret_dir: "/etc/honeybee/secrets"
