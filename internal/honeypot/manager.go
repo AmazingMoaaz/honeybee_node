@@ -301,12 +301,10 @@ func (hm *HoneypotManager) setupCowrie(instance *HoneypotInstance, config map[st
 		}
 	}
 
-	// Install Cowrie itself
-	pipInstallCowrie := exec.CommandContext(hm.ctx, pipPath, "install", "-e", ".")
-	pipInstallCowrie.Dir = instance.InstallPath
-	if err := pipInstallCowrie.Run(); err != nil {
-		logger.Warnf("Failed to install cowrie package: %v (might not be needed)", err)
-	}
+	// Note: We don't need `pip install -e .` because we set PYTHONPATH
+	// when running Cowrie. This avoids issues with setuptools_scm and
+	// git shallow clones.
+	logger.Info("Cowrie dependencies installed, skipping editable install (using PYTHONPATH)")
 
 	// Create configuration
 	if err := hm.createCowrieConfig(instance, config); err != nil {
@@ -555,7 +553,7 @@ func (hm *HoneypotManager) startCowrie(instance *HoneypotInstance) error {
 	// Determine paths
 	var pythonPath string
 	if runtime.GOOS == "windows" {
-		pythonPath = filepath.Join(instance.InstallPath, "cowrie-env", "Scripts", "python")
+		pythonPath = filepath.Join(instance.InstallPath, "cowrie-env", "Scripts", "python.exe")
 	} else {
 		pythonPath = filepath.Join(instance.InstallPath, "cowrie-env", "bin", "python")
 	}
@@ -564,12 +562,14 @@ func (hm *HoneypotManager) startCowrie(instance *HoneypotInstance) error {
 	ctx, cancel := context.WithCancel(hm.ctx)
 	instance.cancelFunc = cancel
 
-	// Start Cowrie using twistd
-	twistdPath := filepath.Join(filepath.Dir(pythonPath), "twistd")
-	cmd := exec.CommandContext(ctx, twistdPath, "-n", "cowrie")
+	// Run Cowrie using the cowrie.scripts.cowrie module directly
+	// This avoids needing pip install -e . for the twisted plugin registration
+	srcPath := filepath.Join(instance.InstallPath, "src")
+	cmd := exec.CommandContext(ctx, pythonPath, "-m", "cowrie.scripts.cowrie", "start", "-n")
 	cmd.Dir = instance.InstallPath
 	cmd.Env = append(os.Environ(),
-		fmt.Sprintf("PYTHONPATH=%s", filepath.Join(instance.InstallPath, "src")),
+		fmt.Sprintf("PYTHONPATH=%s", srcPath),
+		fmt.Sprintf("COWRIE_HOME=%s", instance.InstallPath),
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

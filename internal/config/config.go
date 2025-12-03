@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -77,12 +78,49 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
+	// Expand ~ in paths
+	cfg.ExpandPaths()
+
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
 
 	return &cfg, nil
+}
+
+// ExpandPaths expands ~ to user home directory in all path fields
+func (c *Config) ExpandPaths() {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+
+	// Expand honeypot base dir
+	if strings.HasPrefix(c.Honeypot.BaseDir, "~") {
+		c.Honeypot.BaseDir = filepath.Join(homeDir, c.Honeypot.BaseDir[1:])
+	}
+
+	// Expand TLS paths
+	if strings.HasPrefix(c.TLS.CertFile, "~") {
+		c.TLS.CertFile = filepath.Join(homeDir, c.TLS.CertFile[1:])
+	}
+	if strings.HasPrefix(c.TLS.KeyFile, "~") {
+		c.TLS.KeyFile = filepath.Join(homeDir, c.TLS.KeyFile[1:])
+	}
+	if strings.HasPrefix(c.TLS.CAFile, "~") {
+		c.TLS.CAFile = filepath.Join(homeDir, c.TLS.CAFile[1:])
+	}
+
+	// Expand log file path
+	if strings.HasPrefix(c.Log.File, "~") {
+		c.Log.File = filepath.Join(homeDir, c.Log.File[1:])
+	}
+
+	// Expand TOTP secret dir
+	if strings.HasPrefix(c.Auth.TOTPSecretDir, "~") {
+		c.Auth.TOTPSecretDir = filepath.Join(homeDir, c.Auth.TOTPSecretDir[1:])
+	}
 }
 
 // LoadOrCreateDefault loads config or creates a default one
