@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -197,11 +198,8 @@ func (hm *HoneypotManager) installHoneypotAsync(instance *HoneypotInstance, cmd 
 		// Move honeypot to final location
 		if err := os.Rename(honeypotSrcPath, instance.InstallPath); err != nil {
 			// If rename fails (cross-device), try copy
-			cpCmd := exec.CommandContext(hm.ctx, "cp", "-r", honeypotSrcPath, instance.InstallPath)
-			if runtime.GOOS == "windows" {
-				cpCmd = exec.CommandContext(hm.ctx, "xcopy", honeypotSrcPath, instance.InstallPath, "/E", "/I", "/H")
-			}
-			if err := cpCmd.Run(); err != nil {
+			logger.Infof("Rename failed, copying directory: %v", err)
+			if err := copyDir(honeypotSrcPath, instance.InstallPath); err != nil {
 				logger.Errorf("Failed to copy honeypot: %v", err)
 				instance.Status = protocol.HoneypotStatusFailed
 				hm.sendStatusUpdate(instance, fmt.Sprintf("Failed to copy honeypot: %v", err))
@@ -550,11 +548,13 @@ func (hm *HoneypotManager) startGenericPython(instance *HoneypotInstance) error 
 func (hm *HoneypotManager) startCowrie(instance *HoneypotInstance) error {
 	logger.Infof("Starting Cowrie honeypot %s", instance.ID)
 
-	// Determine paths
-	var pythonPath string
+	// Determine paths based on OS
+	var twistdPath, pythonPath string
 	if runtime.GOOS == "windows" {
+		twistdPath = filepath.Join(instance.InstallPath, "cowrie-env", "Scripts", "twistd.exe")
 		pythonPath = filepath.Join(instance.InstallPath, "cowrie-env", "Scripts", "python.exe")
 	} else {
+		twistdPath = filepath.Join(instance.InstallPath, "cowrie-env", "bin", "twistd")
 		pythonPath = filepath.Join(instance.InstallPath, "cowrie-env", "bin", "python")
 	}
 
@@ -562,14 +562,17 @@ func (hm *HoneypotManager) startCowrie(instance *HoneypotInstance) error {
 	ctx, cancel := context.WithCancel(hm.ctx)
 	instance.cancelFunc = cancel
 
-	// Run Cowrie using the cowrie.scripts.cowrie module directly
-	// This avoids needing pip install -e . for the twisted plugin registration
+	// Source path for PYTHONPATH
 	srcPath := filepath.Join(instance.InstallPath, "src")
-	cmd := exec.CommandContext(ctx, pythonPath, "-m", "cowrie.scripts.cowrie", "start", "-n")
+
+	// Run twistd directly with cowrie plugin
+	// Arguments: twistd -n -l - cowrie
+	// -n = nodaemon (foreground)
+	// -l - = log to stdout
+	cmd := exec.CommandContext(ctx, pythonPath, twistdPath, "-n", "-l", "-", "cowrie")
 	cmd.Dir = instance.InstallPath
 	cmd.Env = append(os.Environ(),
 		fmt.Sprintf("PYTHONPATH=%s", srcPath),
-		fmt.Sprintf("COWRIE_HOME=%s", instance.InstallPath),
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -808,4 +811,69 @@ func (hm *HoneypotManager) findHoneypotForEvent(event map[string]interface{}) st
 	}
 
 	return "unknown"
+}
+
+// copyDir recursively copies a directory from src to dst
+func copyDir(src, dst string) error {
+	// Get source info
+	srcInfo, err := os.Stat(src)
+	if err != nil {
+		return fmt.Errorf("failed to stat source: %w", err)
+	}
+
+	// Create destination directory
+	if err := os.MkdirAll(dst, srcInfo.Mode()); err != nil {
+		return fmt.Errorf("failed to create destination directory: %w", err)
+	}
+
+	// Read directory contents
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return fmt.Errorf("failed to read source directory: %w", err)
+	}
+
+	for _, entry := range entries {
+		srcPath := filepath.Join(src, entry.Name())
+		dstPath := filepath.Join(dst, entry.Name())
+
+		if entry.IsDir() {
+			// Recursively copy subdirectory
+			if err := copyDir(srcPath, dstPath); err != nil {
+				return err
+			}
+		} else {
+			// Copy file
+			if err := copyFile(srcPath, dstPath); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// copyFile copies a single file from src to dst
+func copyFile(src, dst string) error {
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("failed to open source file: %w", err)
+	}
+	defer srcFile.Close()
+
+	srcInfo, err := srcFile.Stat()
+	if err != nil {
+		return fmt.Errorf("failed to stat source file: %w", err)
+	}
+
+	dstFile, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, srcInfo.Mode())
+	if err != nil {
+		return fmt.Errorf("failed to create destination file: %w", err)
+	}
+	defer dstFile.Close()
+
+	if _, err := io.Copy(dstFile, srcFile); err != nil {
+		return fmt.Errorf("failed to copy file contents: %w", err)
+	}
+
+	return nil
 }
