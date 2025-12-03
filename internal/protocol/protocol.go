@@ -1,9 +1,19 @@
+// Package protocol defines the communication protocol between HoneyBee nodes
+// and the HoneyBee Core manager. It provides message types, envelopes, and
+// serialization formats for all inter-component communication.
+//
+// The protocol uses JSON encoding wrapped in versioned envelopes to support
+// backwards compatibility and protocol evolution.
 package protocol
 
-import "time"
+import (
+	"encoding/json"
+	"fmt"
+	"time"
 
-// Protocol version - must match honeybee_core
-const ProtocolVersion uint64 = 2
+	"github.com/honeybee/node/internal/constants"
+	"github.com/honeybee/node/internal/errors"
+)
 
 // NodeType classifies the capability level of a node
 type NodeType string
@@ -158,18 +168,130 @@ type HoneypotEvent struct {
 }
 
 // =============================================================================
-// Helper constructors
+// Validation Methods
 // =============================================================================
 
-// Helper constructors for events
+// Validate checks if a NodeRegistration is valid
+func (nr *NodeRegistration) Validate() error {
+	if nr.NodeID == 0 {
+		return errors.Wrap(nil, errors.ErrCategoryProtocol, "INVALID_NODE_ID", "Node ID cannot be zero")
+	}
+	if nr.NodeName == "" {
+		return errors.Wrap(nil, errors.ErrCategoryProtocol, "INVALID_NODE_NAME", "Node name cannot be empty")
+	}
+	if nr.NodeType != NodeTypeFull && nr.NodeType != NodeTypeAgent {
+		return errors.Wrap(nil, errors.ErrCategoryProtocol, "INVALID_NODE_TYPE", "Invalid node type")
+	}
+	return nil
+}
+
+// Validate checks if an InstallHoneypotCmd is valid
+func (cmd *InstallHoneypotCmd) Validate() error {
+	if cmd.HoneypotID == "" {
+		return errors.Wrap(nil, errors.ErrCategoryProtocol, "INVALID_HONEYPOT_ID", "Honeypot ID cannot be empty")
+	}
+	if cmd.HoneypotType == "" {
+		return errors.Wrap(nil, errors.ErrCategoryProtocol, "INVALID_HONEYPOT_TYPE", "Honeypot type cannot be empty")
+	}
+	// Validate honeypot type is supported
+	supported := false
+	for _, t := range constants.SupportedHoneypotTypes {
+		if cmd.HoneypotType == t {
+			supported = true
+			break
+		}
+	}
+	if !supported {
+		return errors.Wrap(nil, errors.ErrCategoryProtocol, "UNSUPPORTED_HONEYPOT",
+			fmt.Sprintf("Honeypot type '%s' is not supported", cmd.HoneypotType))
+	}
+	return nil
+}
+
+// Validate checks if a StartHoneypotCmd is valid
+func (cmd *StartHoneypotCmd) Validate() error {
+	if cmd.HoneypotID == "" {
+		return errors.Wrap(nil, errors.ErrCategoryProtocol, "INVALID_HONEYPOT_ID", "Honeypot ID cannot be empty")
+	}
+	return nil
+}
+
+// Validate checks if a StopHoneypotCmd is valid
+func (cmd *StopHoneypotCmd) Validate() error {
+	if cmd.HoneypotID == "" {
+		return errors.Wrap(nil, errors.ErrCategoryProtocol, "INVALID_HONEYPOT_ID", "Honeypot ID cannot be empty")
+	}
+	return nil
+}
+
+// Validate checks if a MessageEnvelope is valid
+func (env *MessageEnvelope) Validate() error {
+	if env.Version != constants.ProtocolVersion {
+		return errors.Wrap(nil, errors.ErrCategoryProtocol, "VERSION_MISMATCH",
+			fmt.Sprintf("Protocol version mismatch: expected %d, got %d",
+				constants.ProtocolVersion, env.Version))
+	}
+	return nil
+}
+
+// =============================================================================
+// Encoding/Decoding Methods
+// =============================================================================
+
+// MarshalEnvelope wraps a message in an envelope and marshals to JSON
+func MarshalEnvelope(msg *MessageType) ([]byte, error) {
+	envelope := &MessageEnvelope{
+		Version: constants.ProtocolVersion,
+		Message: *msg,
+	}
+
+	data, err := json.Marshal(envelope)
+	if err != nil {
+		return nil, errors.Wrap(err, errors.ErrCategoryProtocol, "MARSHAL_FAILED", "Failed to marshal message")
+	}
+
+	if len(data) > constants.MaxMessageSize {
+		return nil, errors.Wrap(nil, errors.ErrCategoryProtocol, "MESSAGE_TOO_LARGE",
+			fmt.Sprintf("Message size %d exceeds maximum %d", len(data), constants.MaxMessageSize))
+	}
+
+	return data, nil
+}
+
+// UnmarshalEnvelope unmarshals JSON data into a MessageEnvelope
+func UnmarshalEnvelope(data []byte) (*MessageEnvelope, error) {
+	if len(data) > constants.MaxMessageSize {
+		return nil, errors.Wrap(nil, errors.ErrCategoryProtocol, "MESSAGE_TOO_LARGE",
+			fmt.Sprintf("Message size %d exceeds maximum %d", len(data), constants.MaxMessageSize))
+	}
+
+	var envelope MessageEnvelope
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return nil, errors.Wrap(err, errors.ErrCategoryProtocol, "UNMARSHAL_FAILED", "Failed to unmarshal message")
+	}
+
+	if err := envelope.Validate(); err != nil {
+		return nil, err
+	}
+
+	return &envelope, nil
+}
+
+// =============================================================================
+// Helper Constructors
+// =============================================================================
+
+// NewStartedEvent creates a new "Started" node event
 func NewStartedEvent() *NodeEvent {
 	return &NodeEvent{Type: "Started"}
 }
 
+// NewStoppedEvent creates a new "Stopped" node event
 func NewStoppedEvent() *NodeEvent {
 	return &NodeEvent{Type: "Stopped"}
 }
 
+// NewAlarmEvent creates a new "Alarm" node event with a description
 func NewAlarmEvent(description string) *NodeEvent {
 	return &NodeEvent{
 		Type:        "Alarm",
@@ -177,6 +299,7 @@ func NewAlarmEvent(description string) *NodeEvent {
 	}
 }
 
+// NewErrorEvent creates a new "Error" node event with a message
 func NewErrorEvent(message string) *NodeEvent {
 	return &NodeEvent{
 		Type:    "Error",

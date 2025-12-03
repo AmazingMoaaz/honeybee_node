@@ -13,6 +13,7 @@ import (
 
 	"github.com/honeybee/node/internal/auth"
 	"github.com/honeybee/node/internal/config"
+	"github.com/honeybee/node/internal/constants"
 	"github.com/honeybee/node/internal/honeypot"
 	"github.com/honeybee/node/internal/logger"
 	"github.com/honeybee/node/internal/protocol"
@@ -229,7 +230,7 @@ func (nc *NodeClient) register() error {
 	}
 
 	envelope := protocol.MessageEnvelope{
-		Version: protocol.ProtocolVersion,
+		Version: constants.ProtocolVersion,
 		Message: protocol.MessageType{
 			NodeRegistration: &registration,
 		},
@@ -287,9 +288,9 @@ func (nc *NodeClient) waitForRegistrationAck() (*protocol.RegistrationAck, error
 	}
 
 	// Validate protocol version
-	if envelope.Version != protocol.ProtocolVersion {
+	if envelope.Version != constants.ProtocolVersion {
 		logger.Warnf("Protocol version mismatch: got %d, expected %d",
-			envelope.Version, protocol.ProtocolVersion)
+			envelope.Version, constants.ProtocolVersion)
 	}
 
 	if envelope.Message.RegistrationAck == nil {
@@ -365,9 +366,9 @@ func (nc *NodeClient) readMessages(errorChan chan<- error) {
 // handleMessage processes incoming messages from the server
 func (nc *NodeClient) handleMessage(envelope *protocol.MessageEnvelope) error {
 	// Validate protocol version
-	if envelope.Version != protocol.ProtocolVersion {
+	if envelope.Version != constants.ProtocolVersion {
 		logger.Warnf("Protocol version mismatch: got %d, expected %d",
-			envelope.Version, protocol.ProtocolVersion)
+			envelope.Version, constants.ProtocolVersion)
 	}
 
 	// Handle NodeCommand
@@ -473,7 +474,7 @@ func (nc *NodeClient) handleStopHoneypot(cmd *protocol.StopHoneypotCmd) {
 // sendHoneypotEvent sends a honeypot event to the server
 func (nc *NodeClient) sendHoneypotEvent(event *protocol.HoneypotEvent) error {
 	envelope := protocol.MessageEnvelope{
-		Version: protocol.ProtocolVersion,
+		Version: constants.ProtocolVersion,
 		Message: protocol.MessageType{
 			HoneypotEvent: event,
 		},
@@ -511,7 +512,7 @@ func (nc *NodeClient) sendMessage(envelope protocol.MessageEnvelope) error {
 // sendStatusUpdate sends a status update to the server
 func (nc *NodeClient) sendStatusUpdate(status protocol.NodeStatus) error {
 	envelope := protocol.MessageEnvelope{
-		Version: protocol.ProtocolVersion,
+		Version: constants.ProtocolVersion,
 		Message: protocol.MessageType{
 			NodeStatusUpdate: &protocol.NodeStatusUpdate{
 				NodeID: nc.nodeID,
@@ -526,7 +527,7 @@ func (nc *NodeClient) sendStatusUpdate(status protocol.NodeStatus) error {
 // sendEvent sends an event to the server
 func (nc *NodeClient) sendEvent(event *protocol.NodeEvent) error {
 	envelope := protocol.MessageEnvelope{
-		Version: protocol.ProtocolVersion,
+		Version: constants.ProtocolVersion,
 		Message: protocol.MessageType{
 			NodeEvent: event,
 		},
@@ -541,7 +542,7 @@ func (nc *NodeClient) sendNodeDrop() error {
 
 	dropFlag := true
 	envelope := protocol.MessageEnvelope{
-		Version: protocol.ProtocolVersion,
+		Version: constants.ProtocolVersion,
 		Message: protocol.MessageType{
 			NodeDrop: &dropFlag,
 		},
