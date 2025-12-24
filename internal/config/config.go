@@ -260,7 +260,7 @@ func (c *Config) validateNode() error {
 		return errors.New(errors.ErrCategoryConfig, "INVALID_NODE_TYPE",
 			fmt.Sprintf("Invalid node type: %s (must be 'Full' or 'Agent')", c.Node.Type))
 	}
-	
+
 	// Validate port if specified
 	if c.Node.Port > 0 && c.Node.Port < 1024 {
 		return errors.New(errors.ErrCategoryConfig, "INVALID_PORT",
@@ -294,7 +294,7 @@ func (c *Config) validateServer() error {
 	if port != "" {
 		// Port will be validated by net.SplitHostPort already
 	}
-	
+
 	// Validate intervals
 	if c.Server.HeartbeatInterval <= 0 {
 		return errors.New(errors.ErrCategoryConfig, "INVALID_HEARTBEAT", 
@@ -310,7 +310,7 @@ func (c *Config) validateServer() error {
 	}
 	
 	return nil
-}
+	}
 
 // validateTLS validates TLS configuration
 func (c *Config) validateTLS() error {
@@ -330,7 +330,7 @@ func (c *Config) validateTLS() error {
 			return errors.New(errors.ErrCategoryConfig, "CERT_FILE_NOT_FOUND",
 				fmt.Sprintf("TLS cert file not found: %s", c.TLS.CertFile))
 		}
-	}
+		}
 	if c.TLS.KeyFile != "" {
 		if _, err := os.Stat(c.TLS.KeyFile); os.IsNotExist(err) {
 			return errors.New(errors.ErrCategoryConfig, "KEY_FILE_NOT_FOUND",
@@ -407,6 +407,6 @@ func (c *Config) validateHoneypot() error {
 				fmt.Sprintf("Failed to create honeypot directory: %s", c.Honeypot.BaseDir))
 		}
 	}
-	
+
 	return nil
 }

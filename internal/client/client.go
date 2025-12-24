@@ -387,11 +387,11 @@ func (nc *NodeClient) handleNodeCommand(cmd *protocol.NodeCommand) {
 
 	switch {
 	case cmdType.Restart != nil:
-		logger.Info("Restart command received")
-		nc.sendStatusUpdate(protocol.NodeStatusStopped)
-		time.Sleep(500 * time.Millisecond)
-		nc.sendStatusUpdate(protocol.NodeStatusRunning)
-		nc.sendEvent(protocol.NewStartedEvent())
+			logger.Info("Restart command received")
+			nc.sendStatusUpdate(protocol.NodeStatusStopped)
+			time.Sleep(500 * time.Millisecond)
+			nc.sendStatusUpdate(protocol.NodeStatusRunning)
+			nc.sendEvent(protocol.NewStartedEvent())
 
 	case cmdType.UpdateConfig != nil:
 		logger.Info("UpdateConfig command received")
@@ -440,7 +440,7 @@ func (nc *NodeClient) handleNodeCommand(cmd *protocol.NodeCommand) {
 		logger.Info("GetInstalledPots command")
 		nc.handleGetInstalledPots()
 
-	default:
+		default:
 		logger.Warnf("Unknown command type: %s", cmdName)
 		nc.sendEvent(protocol.NewErrorEvent(fmt.Sprintf("Unknown command: %s", cmdName)))
 	}
@@ -510,7 +510,7 @@ func (nc *NodeClient) handleRestartPot(potID string) {
 	// Stop then start
 	if err := nc.honeypotMgr.StopHoneypot(potID); err != nil {
 		logger.Warnf("Error stopping pot for restart: %v", err)
-	}
+		}
 	time.Sleep(500 * time.Millisecond)
 	if err := nc.honeypotMgr.StartHoneypot(potID); err != nil {
 		logger.Errorf("Failed to restart pot: %v", err)
