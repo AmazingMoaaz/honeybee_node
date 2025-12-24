@@ -23,7 +23,7 @@ type HoneypotManager struct {
 	baseDir       string
 	honeypots     map[string]*HoneypotInstance
 	mu            sync.RWMutex
-	eventChan     chan *protocol.HoneypotEvent
+	eventChan     chan *protocol.PotEvent
 	nodeID        uint64
 	eventListener net.Listener
 	listenerPort  int
@@ -37,7 +37,7 @@ type HoneypotInstance struct {
 	Type        string
 	GitURL      string
 	InstallPath string
-	Status      protocol.HoneypotStatus
+	Status      protocol.PotStatus
 	SSHPort     uint16
 	TelnetPort  uint16
 	Process     *exec.Cmd
@@ -57,7 +57,7 @@ func NewHoneypotManager(baseDir string, nodeID uint64) (*HoneypotManager, error)
 	return &HoneypotManager{
 		baseDir:   baseDir,
 		honeypots: make(map[string]*HoneypotInstance),
-		eventChan: make(chan *protocol.HoneypotEvent, 1000),
+		eventChan: make(chan *protocol.PotEvent, 1000),
 		nodeID:    nodeID,
 		ctx:       ctx,
 		cancel:    cancel,
@@ -95,68 +95,96 @@ func (hm *HoneypotManager) Stop() {
 	logger.Info("HoneypotManager stopped")
 }
 
-// EventChannel returns the channel for honeypot events
-func (hm *HoneypotManager) EventChannel() <-chan *protocol.HoneypotEvent {
+// EventChannel returns the channel for pot (honeypot) events
+func (hm *HoneypotManager) EventChannel() <-chan *protocol.PotEvent {
 	return hm.eventChan
 }
 
-// InstallHoneypot installs a honeypot from a Git repository
-func (hm *HoneypotManager) InstallHoneypot(cmd *protocol.InstallHoneypotCmd) error {
+// InstallPot installs a honeypot (pot) from a Git repository
+// Matches honeybee_core protocol - accepts InstallPot command
+func (hm *HoneypotManager) InstallPot(cmd *protocol.InstallPot) error {
 	hm.mu.Lock()
 	defer hm.mu.Unlock()
 
 	// Check if honeypot already exists
-	if _, exists := hm.honeypots[cmd.HoneypotID]; exists {
-		return fmt.Errorf("honeypot %s already exists", cmd.HoneypotID)
+	if _, exists := hm.honeypots[cmd.PotID]; exists {
+		return fmt.Errorf("pot %s already exists", cmd.PotID)
 	}
 
-	installPath := filepath.Join(hm.baseDir, cmd.HoneypotID)
+	installPath := filepath.Join(hm.baseDir, cmd.PotID)
+
+	// Get git URL
+	gitURL := ""
+	if cmd.GitURL != nil {
+		gitURL = *cmd.GitURL
+	}
 
 	instance := &HoneypotInstance{
-		ID:          cmd.HoneypotID,
+		ID:          cmd.PotID,
 		Type:        cmd.HoneypotType,
-		GitURL:      cmd.GitURL,
+		GitURL:      gitURL,
 		InstallPath: installPath,
-		Status:      protocol.HoneypotStatusInstalling,
-		SSHPort:     cmd.SSHPort,
-		TelnetPort:  cmd.TelnetPort,
+		Status:      protocol.PotStatusInstalling,
+		SSHPort:     2222, // Default SSH port
+		TelnetPort:  2223, // Default Telnet port
 	}
 
-	// Set default ports
-	if instance.SSHPort == 0 {
-		instance.SSHPort = 2222
-	}
-	if instance.TelnetPort == 0 {
-		instance.TelnetPort = 2223
+	// Override ports from config if provided
+	if cmd.Config != nil {
+		if sshPort, ok := cmd.Config["ssh_port"]; ok {
+			if p, err := parsePort(sshPort); err == nil {
+				instance.SSHPort = p
+			}
+		}
+		if telnetPort, ok := cmd.Config["telnet_port"]; ok {
+			if p, err := parsePort(telnetPort); err == nil {
+				instance.TelnetPort = p
+			}
+		}
 	}
 
-	hm.honeypots[cmd.HoneypotID] = instance
+	hm.honeypots[cmd.PotID] = instance
 
 	// Install honeypot in background
-	go hm.installHoneypotAsync(instance, cmd)
+	go hm.installPotAsync(instance, cmd)
 
 	return nil
+}
+
+// parsePort parses a string port number
+func parsePort(s string) (uint16, error) {
+	var port int
+	_, err := fmt.Sscanf(s, "%d", &port)
+	if err != nil {
+		return 0, err
+	}
+	if port < 1 || port > 65535 {
+		return 0, fmt.Errorf("port out of range")
+	}
+	return uint16(port), nil
 }
 
 // PotStoreURL is the official HoneyBee PotStore repository
 const PotStoreURL = "https://github.com/H0neyBe/honeybee_potstore.git"
 
-// installHoneypotAsync performs the actual installation asynchronously
-func (hm *HoneypotManager) installHoneypotAsync(instance *HoneypotInstance, cmd *protocol.InstallHoneypotCmd) {
-	logger.Infof("Installing honeypot %s (type: %s)", instance.ID, instance.Type)
+// installPotAsync performs the actual installation asynchronously
+func (hm *HoneypotManager) installPotAsync(instance *HoneypotInstance, cmd *protocol.InstallPot) {
+	logger.Infof("Installing pot %s (type: %s)", instance.ID, instance.Type)
 
 	// Send installing status
 	hm.sendStatusUpdate(instance, "Installing from HoneyBee PotStore...")
 
 	// Determine source: use custom git_url if provided, otherwise use PotStore
-	gitURL := cmd.GitURL
-	if gitURL == "" {
+	gitURL := ""
+	if cmd.GitURL != nil && *cmd.GitURL != "" {
+		gitURL = *cmd.GitURL
+	} else {
 		gitURL = PotStoreURL
 	}
 
-	branch := cmd.GitBranch
-	if branch == "" {
-		branch = "main"
+	branch := "main"
+	if cmd.GitBranch != nil && *cmd.GitBranch != "" {
+		branch = *cmd.GitBranch
 	}
 
 	// Clone the repository
@@ -173,7 +201,7 @@ func (hm *HoneypotManager) installHoneypotAsync(instance *HoneypotInstance, cmd 
 
 	if err := gitCmd.Run(); err != nil {
 		logger.Errorf("Failed to clone repository: %v", err)
-		instance.Status = protocol.HoneypotStatusFailed
+		instance.Status = protocol.PotStatusFailed
 		hm.sendStatusUpdate(instance, fmt.Sprintf("Git clone failed: %v", err))
 		return
 	}
@@ -188,7 +216,7 @@ func (hm *HoneypotManager) installHoneypotAsync(instance *HoneypotInstance, cmd 
 				honeypotSrcPath = entries[0]
 			} else {
 				logger.Errorf("Honeypot %s not found in PotStore", instance.Type)
-				instance.Status = protocol.HoneypotStatusFailed
+				instance.Status = protocol.PotStatusFailed
 				hm.sendStatusUpdate(instance, fmt.Sprintf("Honeypot %s not found in PotStore", instance.Type))
 				os.RemoveAll(tempPath)
 				return
@@ -201,7 +229,7 @@ func (hm *HoneypotManager) installHoneypotAsync(instance *HoneypotInstance, cmd 
 			logger.Infof("Rename failed, copying directory: %v", err)
 			if err := copyDir(honeypotSrcPath, instance.InstallPath); err != nil {
 				logger.Errorf("Failed to copy honeypot: %v", err)
-				instance.Status = protocol.HoneypotStatusFailed
+				instance.Status = protocol.PotStatusFailed
 				hm.sendStatusUpdate(instance, fmt.Sprintf("Failed to copy honeypot: %v", err))
 				os.RemoveAll(tempPath)
 				return
@@ -217,19 +245,19 @@ func (hm *HoneypotManager) installHoneypotAsync(instance *HoneypotInstance, cmd 
 	// Run honeypot-specific setup
 	if err := hm.setupHoneypot(instance, cmd.Config); err != nil {
 		logger.Errorf("Failed to setup honeypot: %v", err)
-		instance.Status = protocol.HoneypotStatusFailed
+		instance.Status = protocol.PotStatusFailed
 		hm.sendStatusUpdate(instance, fmt.Sprintf("Setup failed: %v", err))
 		return
 	}
 
-	instance.Status = protocol.HoneypotStatusStopped
+	instance.Status = protocol.PotStatusStopped
 	hm.sendStatusUpdate(instance, "Installation complete")
 
 	logger.Infof("Honeypot %s installed successfully", instance.ID)
 
 	// Auto-start if requested
 	if cmd.AutoStart {
-		if err := hm.StartHoneypot(cmd.HoneypotID); err != nil {
+		if err := hm.StartHoneypot(cmd.PotID); err != nil {
 			logger.Errorf("Failed to auto-start honeypot: %v", err)
 		}
 	}
@@ -465,7 +493,7 @@ func (hm *HoneypotManager) StartHoneypot(honeypotID string) error {
 	instance.mu.Lock()
 	defer instance.mu.Unlock()
 
-	if instance.Status == protocol.HoneypotStatusRunning {
+	if instance.Status == protocol.PotStatusRunning {
 		return fmt.Errorf("honeypot %s is already running", honeypotID)
 	}
 
@@ -521,20 +549,20 @@ func (hm *HoneypotManager) startGenericPython(instance *HoneypotInstance) error 
 	}
 
 	instance.Process = cmd
-	instance.Status = protocol.HoneypotStatusRunning
+	instance.Status = protocol.PotStatusRunning
 	hm.sendStatusUpdate(instance, fmt.Sprintf("%s honeypot started", instance.Type))
 
 	// Monitor process
 	go func() {
 		err := cmd.Wait()
 		instance.mu.Lock()
-		if instance.Status == protocol.HoneypotStatusRunning {
+		if instance.Status == protocol.PotStatusRunning {
 			if err != nil {
 				logger.Errorf("%s process exited with error: %v", instance.Type, err)
-				instance.Status = protocol.HoneypotStatusFailed
+				instance.Status = protocol.PotStatusFailed
 				hm.sendStatusUpdate(instance, fmt.Sprintf("Process exited: %v", err))
 			} else {
-				instance.Status = protocol.HoneypotStatusStopped
+				instance.Status = protocol.PotStatusStopped
 				hm.sendStatusUpdate(instance, "Process exited normally")
 			}
 		}
@@ -583,20 +611,20 @@ func (hm *HoneypotManager) startCowrie(instance *HoneypotInstance) error {
 	}
 
 	instance.Process = cmd
-	instance.Status = protocol.HoneypotStatusRunning
+	instance.Status = protocol.PotStatusRunning
 	hm.sendStatusUpdate(instance, "Honeypot started")
 
 	// Monitor process in background
 	go func() {
 		err := cmd.Wait()
 		instance.mu.Lock()
-		if instance.Status == protocol.HoneypotStatusRunning {
+		if instance.Status == protocol.PotStatusRunning {
 			if err != nil {
 				logger.Errorf("Cowrie process exited with error: %v", err)
-				instance.Status = protocol.HoneypotStatusFailed
+				instance.Status = protocol.PotStatusFailed
 				hm.sendStatusUpdate(instance, fmt.Sprintf("Process exited: %v", err))
 			} else {
-				instance.Status = protocol.HoneypotStatusStopped
+				instance.Status = protocol.PotStatusStopped
 				hm.sendStatusUpdate(instance, "Process exited normally")
 			}
 		}
@@ -627,7 +655,7 @@ func (hm *HoneypotManager) stopHoneypot(instance *HoneypotInstance) error {
 	instance.mu.Lock()
 	defer instance.mu.Unlock()
 
-	if instance.Status != protocol.HoneypotStatusRunning {
+	if instance.Status != protocol.PotStatusRunning {
 		return nil
 	}
 
@@ -641,71 +669,54 @@ func (hm *HoneypotManager) stopHoneypot(instance *HoneypotInstance) error {
 		instance.Process.Process.Kill()
 	}
 
-	instance.Status = protocol.HoneypotStatusStopped
+	instance.Status = protocol.PotStatusStopped
 	hm.sendStatusUpdate(instance, "Honeypot stopped")
 
 	return nil
 }
 
-// GetStatus returns the status of a honeypot
-func (hm *HoneypotManager) GetStatus(honeypotID string) (*protocol.HoneypotStatusUpdate, error) {
+// GetStatus returns the status of a pot (honeypot)
+func (hm *HoneypotManager) GetStatus(potID string) (*protocol.PotStatusUpdate, error) {
 	hm.mu.RLock()
-	instance, exists := hm.honeypots[honeypotID]
+	instance, exists := hm.honeypots[potID]
 	hm.mu.RUnlock()
 
 	if !exists {
-		return nil, fmt.Errorf("honeypot %s not found", honeypotID)
+		return nil, fmt.Errorf("pot %s not found", potID)
 	}
 
-	return &protocol.HoneypotStatusUpdate{
-		NodeID:       hm.nodeID,
-		HoneypotID:   instance.ID,
-		HoneypotType: instance.Type,
-		Status:       instance.Status,
-		SSHPort:      instance.SSHPort,
-		TelnetPort:   instance.TelnetPort,
-	}, nil
+	return protocol.NewPotStatusUpdate(hm.nodeID, instance.ID, instance.Type, instance.Status, ""), nil
 }
 
-// ListHoneypots returns all honeypot instances
-func (hm *HoneypotManager) ListHoneypots() []*protocol.HoneypotStatusUpdate {
+// ListPots returns all pot (honeypot) instances
+func (hm *HoneypotManager) ListPots() []*protocol.PotStatusUpdate {
 	hm.mu.RLock()
 	defer hm.mu.RUnlock()
 
-	var result []*protocol.HoneypotStatusUpdate
+	var result []*protocol.PotStatusUpdate
 	for _, instance := range hm.honeypots {
-		result = append(result, &protocol.HoneypotStatusUpdate{
-			NodeID:       hm.nodeID,
-			HoneypotID:   instance.ID,
-			HoneypotType: instance.Type,
-			Status:       instance.Status,
-			SSHPort:      instance.SSHPort,
-			TelnetPort:   instance.TelnetPort,
-		})
+		result = append(result, protocol.NewPotStatusUpdate(
+			hm.nodeID, instance.ID, instance.Type, instance.Status, ""))
 	}
 	return result
 }
 
-// sendStatusUpdate sends a honeypot status update to the event channel
+// sendStatusUpdate sends a pot status update to the event channel
 func (hm *HoneypotManager) sendStatusUpdate(instance *HoneypotInstance, message string) {
-	update := &protocol.HoneypotStatusUpdate{
-		NodeID:       hm.nodeID,
-		HoneypotID:   instance.ID,
-		HoneypotType: instance.Type,
-		Status:       instance.Status,
-		Message:      message,
-		SSHPort:      instance.SSHPort,
-		TelnetPort:   instance.TelnetPort,
-	}
-
-	// Create a HoneypotEvent to carry the status update
-	event := &protocol.HoneypotEvent{
-		NodeID:       hm.nodeID,
-		HoneypotID:   instance.ID,
-		HoneypotType: instance.Type,
-		EventID:      "honeybee.honeypot.status",
-		Timestamp:    time.Now(),
-		Message:      fmt.Sprintf("Status: %s - %s", update.Status, message),
+	// Create a PotEvent to carry the status update
+	msg := fmt.Sprintf("Status: %s - %s", instance.Status, message)
+	event := &protocol.PotEvent{
+		NodeID:    hm.nodeID,
+		PotID:     instance.ID,
+		Event:     "honeybee.pot.status",
+		Message:   &msg,
+		Timestamp: uint64(time.Now().Unix()),
+		Metadata: map[string]string{
+			"pot_type":    instance.Type,
+			"status":      string(instance.Status),
+			"ssh_port":    fmt.Sprintf("%d", instance.SSHPort),
+			"telnet_port": fmt.Sprintf("%d", instance.TelnetPort),
+		},
 	}
 
 	select {
@@ -780,17 +791,17 @@ func (hm *HoneypotManager) handleConnection(conn net.Conn) {
 			continue
 		}
 
-		// Find the honeypot instance this event belongs to
-		honeypotID := hm.findHoneypotForEvent(rawEvent)
+		// Find the pot (honeypot) instance this event belongs to
+		potID := hm.findHoneypotForEvent(rawEvent)
 
-		// Create HoneypotEvent
-		event := protocol.NewHoneypotEvent(hm.nodeID, honeypotID, "cowrie", rawEvent)
+		// Create PotEvent
+		event := protocol.NewPotEvent(hm.nodeID, potID, rawEvent)
 
 		// Send to event channel
 		select {
 		case hm.eventChan <- event:
 		default:
-			logger.Warn("Event channel full, dropping honeypot event")
+			logger.Warn("Event channel full, dropping pot event")
 		}
 	}
 }

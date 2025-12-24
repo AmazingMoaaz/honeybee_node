@@ -24,9 +24,11 @@ const (
 )
 
 // NodeStatus represents the lifecycle state of a node
+// Matches honeybee_core/bee_message/src/common.rs
 type NodeStatus string
 
 const (
+	NodeStatusConnected NodeStatus = "Connected"
 	NodeStatusDeploying NodeStatus = "Deploying"
 	NodeStatusRunning   NodeStatus = "Running"
 	NodeStatusStopped   NodeStatus = "Stopped"
@@ -34,14 +36,15 @@ const (
 	NodeStatusUnknown   NodeStatus = "Unknown"
 )
 
-// HoneypotStatus represents the lifecycle state of a honeypot
-type HoneypotStatus string
+// PotStatus represents the lifecycle state of a honeypot (pot)
+// Matches honeybee_core/bee_message/src/node/node_to_manager.rs
+type PotStatus string
 
 const (
-	HoneypotStatusInstalling HoneypotStatus = "Installing"
-	HoneypotStatusRunning    HoneypotStatus = "Running"
-	HoneypotStatusStopped    HoneypotStatus = "Stopped"
-	HoneypotStatusFailed     HoneypotStatus = "Failed"
+	PotStatusInstalling PotStatus = "Installing"
+	PotStatusRunning    PotStatus = "Running"
+	PotStatusStopped    PotStatus = "Stopped"
+	PotStatusFailed     PotStatus = "Failed"
 )
 
 // MessageEnvelope wraps all protocol messages with versioning
@@ -51,25 +54,20 @@ type MessageEnvelope struct {
 }
 
 // MessageType represents the union of all message types
+// This structure matches the Rust enum serialization format from honeybee_core
 type MessageType struct {
-	// Node to Manager messages
+	// Node to Manager messages (NodeToManagerMessage enum variants)
 	NodeRegistration *NodeRegistration `json:"NodeRegistration,omitempty"`
 	NodeStatusUpdate *NodeStatusUpdate `json:"NodeStatusUpdate,omitempty"`
 	NodeEvent        *NodeEvent        `json:"NodeEvent,omitempty"`
-	NodeDrop         *bool             `json:"NodeDrop,omitempty"` // Use pointer to detect presence
+	NodeDrop         *struct{}         `json:"NodeDrop,omitempty"` // Unit variant
 
-	// Honeypot-specific messages (Node → Manager)
-	HoneypotStatusUpdate *HoneypotStatusUpdate `json:"HoneypotStatusUpdate,omitempty"`
-	HoneypotEvent        *HoneypotEvent        `json:"HoneypotEvent,omitempty"`
+	// Pot status update (Node → Manager)
+	PotStatusUpdate *PotStatusUpdate `json:"PotStatusUpdate,omitempty"`
 
-	// Manager to Node messages
+	// Manager to Node messages (ManagerToNodeMessage enum variants)
 	NodeCommand     *NodeCommand     `json:"NodeCommand,omitempty"`
 	RegistrationAck *RegistrationAck `json:"RegistrationAck,omitempty"`
-
-	// Honeypot commands (Manager → Node)
-	InstallHoneypot *InstallHoneypotCmd `json:"InstallHoneypot,omitempty"`
-	StartHoneypot   *StartHoneypotCmd   `json:"StartHoneypot,omitempty"`
-	StopHoneypot    *StopHoneypotCmd    `json:"StopHoneypot,omitempty"`
 }
 
 // NodeRegistration is sent during initial connection handshake
@@ -96,9 +94,37 @@ type NodeEvent struct {
 }
 
 // NodeCommand instructs a node to perform an action
+// Matches honeybee_core/bee_message/src/node/manager_to_node.rs
 type NodeCommand struct {
-	NodeID  uint64 `json:"node_id"`
-	Command string `json:"command"`
+	NodeID  uint64          `json:"node_id"`
+	Command NodeCommandType `json:"command"`
+}
+
+// NodeCommandType represents the type of command to execute
+// Matches the Rust enum NodeCommandType
+type NodeCommandType struct {
+	Restart          *struct{}   `json:"Restart,omitempty"`
+	UpdateConfig     *struct{}   `json:"UpdateConfig,omitempty"`
+	InstallPot       *InstallPot `json:"InstallPot,omitempty"`
+	DeployPot        *string     `json:"DeployPot,omitempty"`     // PotId
+	GetPotStatus     *string     `json:"GetPotStatus,omitempty"`  // PotId
+	RestartPot       *string     `json:"RestartPot,omitempty"`    // PotId
+	StopPot          *string     `json:"StopPot,omitempty"`       // PotId
+	GetPotLogs       *string     `json:"GetPotLogs,omitempty"`    // PotId
+	GetPotMetrics    *string     `json:"GetPotMetrics,omitempty"` // PotId
+	GetPotInfo       *string     `json:"GetPotInfo,omitempty"`    // PotId
+	GetInstalledPots *struct{}   `json:"GetInstalledPots,omitempty"`
+}
+
+// InstallPot contains details for installing a honeypot
+// Matches honeybee_core/bee_message/src/node/manager_to_node.rs
+type InstallPot struct {
+	PotID        string            `json:"pot_id"`
+	HoneypotType string            `json:"honeypot_type"`
+	GitURL       *string           `json:"git_url,omitempty"`
+	GitBranch    *string           `json:"git_branch,omitempty"`
+	Config       map[string]string `json:"config,omitempty"`
+	AutoStart    bool              `json:"auto_start"`
 }
 
 // RegistrationAck confirms whether registration succeeded
@@ -110,61 +136,29 @@ type RegistrationAck struct {
 }
 
 // =============================================================================
-// Honeypot-specific Protocol Messages
+// Pot (Honeypot) Protocol Messages
+// Matches honeybee_core/bee_message/src/node/node_to_manager.rs
 // =============================================================================
 
-// InstallHoneypotCmd instructs the node to install a honeypot from a Git repository
-type InstallHoneypotCmd struct {
-	HoneypotID   string            `json:"honeypot_id"`           // Unique ID for this honeypot instance
-	HoneypotType string            `json:"honeypot_type"`         // "cowrie", "dionaea", etc.
-	GitURL       string            `json:"git_url"`               // GitHub URL to clone
-	GitBranch    string            `json:"git_branch,omitempty"`  // Branch to checkout (default: main)
-	Config       map[string]string `json:"config,omitempty"`      // Configuration overrides
-	SSHPort      uint16            `json:"ssh_port,omitempty"`    // SSH honeypot port (default: 2222)
-	TelnetPort   uint16            `json:"telnet_port,omitempty"` // Telnet honeypot port (default: 2223)
-	AutoStart    bool              `json:"auto_start,omitempty"`  // Start after installation
+// PotStatusUpdate reports the current state of a pot (honeypot)
+// Matches honeybee_core/bee_message/src/node/node_to_manager.rs
+type PotStatusUpdate struct {
+	NodeID  uint64    `json:"node_id"`
+	PotID   string    `json:"pot_id"`
+	PotType string    `json:"pot_type"`
+	Status  PotStatus `json:"status"`
+	Message *string   `json:"message,omitempty"`
 }
 
-// StartHoneypotCmd instructs the node to start a honeypot
-type StartHoneypotCmd struct {
-	HoneypotID string `json:"honeypot_id"`
-}
-
-// StopHoneypotCmd instructs the node to stop a honeypot
-type StopHoneypotCmd struct {
-	HoneypotID string `json:"honeypot_id"`
-}
-
-// HoneypotStatusUpdate reports the current state of a honeypot
-type HoneypotStatusUpdate struct {
-	NodeID       uint64         `json:"node_id"`
-	HoneypotID   string         `json:"honeypot_id"`
-	HoneypotType string         `json:"honeypot_type"`
-	Status       HoneypotStatus `json:"status"`
-	Message      string         `json:"message,omitempty"`
-	SSHPort      uint16         `json:"ssh_port,omitempty"`
-	TelnetPort   uint16         `json:"telnet_port,omitempty"`
-}
-
-// HoneypotEvent represents events captured by the honeypot (attacks, sessions, etc.)
-type HoneypotEvent struct {
-	NodeID       uint64                 `json:"node_id"`
-	HoneypotID   string                 `json:"honeypot_id"`
-	HoneypotType string                 `json:"honeypot_type"`
-	EventID      string                 `json:"eventid"` // Cowrie event ID (e.g., "cowrie.login.success")
-	Timestamp    time.Time              `json:"timestamp"`
-	SessionID    string                 `json:"session,omitempty"`   // Session identifier
-	SrcIP        string                 `json:"src_ip,omitempty"`    // Attacker's IP
-	SrcPort      uint16                 `json:"src_port,omitempty"`  // Attacker's port
-	DstIP        string                 `json:"dst_ip,omitempty"`    // Honeypot IP
-	DstPort      uint16                 `json:"dst_port,omitempty"`  // Honeypot port
-	Protocol     string                 `json:"protocol,omitempty"`  // "ssh" or "telnet"
-	Username     string                 `json:"username,omitempty"`  // Login attempt username
-	Password     string                 `json:"password,omitempty"`  // Login attempt password
-	Input        string                 `json:"input,omitempty"`     // Command input
-	Message      string                 `json:"message,omitempty"`   // Event message
-	Success      *bool                  `json:"success,omitempty"`   // Login success/failure
-	RawEvent     map[string]interface{} `json:"raw_event,omitempty"` // Full raw event from honeypot
+// PotEvent represents events captured by the honeypot
+// Matches honeybee_core/bee_message/src/node/node_to_manager.rs
+type PotEvent struct {
+	NodeID    uint64            `json:"node_id"`
+	PotID     string            `json:"pot_id"`
+	Event     string            `json:"event"`
+	Message   *string           `json:"message,omitempty"`
+	Metadata  map[string]string `json:"metadata,omitempty"`
+	Timestamp uint64            `json:"timestamp"`
 }
 
 // =============================================================================
@@ -185,10 +179,10 @@ func (nr *NodeRegistration) Validate() error {
 	return nil
 }
 
-// Validate checks if an InstallHoneypotCmd is valid
-func (cmd *InstallHoneypotCmd) Validate() error {
-	if cmd.HoneypotID == "" {
-		return errors.Wrap(nil, errors.ErrCategoryProtocol, "INVALID_HONEYPOT_ID", "Honeypot ID cannot be empty")
+// Validate checks if an InstallPot command is valid
+func (cmd *InstallPot) Validate() error {
+	if cmd.PotID == "" {
+		return errors.Wrap(nil, errors.ErrCategoryProtocol, "INVALID_POT_ID", "Pot ID cannot be empty")
 	}
 	if cmd.HoneypotType == "" {
 		return errors.Wrap(nil, errors.ErrCategoryProtocol, "INVALID_HONEYPOT_TYPE", "Honeypot type cannot be empty")
@@ -208,20 +202,46 @@ func (cmd *InstallHoneypotCmd) Validate() error {
 	return nil
 }
 
-// Validate checks if a StartHoneypotCmd is valid
-func (cmd *StartHoneypotCmd) Validate() error {
-	if cmd.HoneypotID == "" {
-		return errors.Wrap(nil, errors.ErrCategoryProtocol, "INVALID_HONEYPOT_ID", "Honeypot ID cannot be empty")
+// Validate checks if a NodeCommand is valid
+func (cmd *NodeCommand) Validate() error {
+	if cmd.NodeID == 0 {
+		return errors.Wrap(nil, errors.ErrCategoryProtocol, "INVALID_NODE_ID", "Node ID cannot be zero")
+	}
+	// Validate the command type has exactly one field set
+	if cmd.Command.InstallPot != nil {
+		return cmd.Command.InstallPot.Validate()
 	}
 	return nil
 }
 
-// Validate checks if a StopHoneypotCmd is valid
-func (cmd *StopHoneypotCmd) Validate() error {
-	if cmd.HoneypotID == "" {
-		return errors.Wrap(nil, errors.ErrCategoryProtocol, "INVALID_HONEYPOT_ID", "Honeypot ID cannot be empty")
+// GetCommandName returns a string representation of the command type
+func (ct *NodeCommandType) GetCommandName() string {
+	switch {
+	case ct.Restart != nil:
+		return "Restart"
+	case ct.UpdateConfig != nil:
+		return "UpdateConfig"
+	case ct.InstallPot != nil:
+		return "InstallPot"
+	case ct.DeployPot != nil:
+		return "DeployPot"
+	case ct.GetPotStatus != nil:
+		return "GetPotStatus"
+	case ct.RestartPot != nil:
+		return "RestartPot"
+	case ct.StopPot != nil:
+		return "StopPot"
+	case ct.GetPotLogs != nil:
+		return "GetPotLogs"
+	case ct.GetPotMetrics != nil:
+		return "GetPotMetrics"
+	case ct.GetPotInfo != nil:
+		return "GetPotInfo"
+	case ct.GetInstalledPots != nil:
+		return "GetInstalledPots"
+	default:
+		return "Unknown"
 	}
-	return nil
 }
 
 // Validate checks if a MessageEnvelope is valid
@@ -307,52 +327,53 @@ func NewErrorEvent(message string) *NodeEvent {
 	}
 }
 
-// NewHoneypotEvent creates a new honeypot event from raw Cowrie JSON
-func NewHoneypotEvent(nodeID uint64, honeypotID, honeypotType string, rawEvent map[string]interface{}) *HoneypotEvent {
-	event := &HoneypotEvent{
-		NodeID:       nodeID,
-		HoneypotID:   honeypotID,
-		HoneypotType: honeypotType,
-		Timestamp:    time.Now(),
-		RawEvent:     rawEvent,
+// NewPotStatusUpdate creates a new pot status update message
+func NewPotStatusUpdate(nodeID uint64, potID, potType string, status PotStatus, message string) *PotStatusUpdate {
+	var msg *string
+	if message != "" {
+		msg = &message
+	}
+	return &PotStatusUpdate{
+		NodeID:  nodeID,
+		PotID:   potID,
+		PotType: potType,
+		Status:  status,
+		Message: msg,
+	}
+}
+
+// NewPotEvent creates a new pot event from raw honeypot event data
+func NewPotEvent(nodeID uint64, potID string, rawEvent map[string]interface{}) *PotEvent {
+	event := &PotEvent{
+		NodeID:    nodeID,
+		PotID:     potID,
+		Timestamp: uint64(time.Now().Unix()),
+		Metadata:  make(map[string]string),
 	}
 
-	// Extract common fields from Cowrie event
+	// Extract event ID
 	if eventID, ok := rawEvent["eventid"].(string); ok {
-		event.EventID = eventID
+		event.Event = eventID
 	}
-	if session, ok := rawEvent["session"].(string); ok {
-		event.SessionID = session
-	}
-	if srcIP, ok := rawEvent["src_ip"].(string); ok {
-		event.SrcIP = srcIP
-	}
-	if srcPort, ok := rawEvent["src_port"].(float64); ok {
-		event.SrcPort = uint16(srcPort)
-	}
-	if dstIP, ok := rawEvent["dst_ip"].(string); ok {
-		event.DstIP = dstIP
-	}
-	if dstPort, ok := rawEvent["dst_port"].(float64); ok {
-		event.DstPort = uint16(dstPort)
-	}
-	if protocol, ok := rawEvent["protocol"].(string); ok {
-		event.Protocol = protocol
-	}
-	if username, ok := rawEvent["username"].(string); ok {
-		event.Username = username
-	}
-	if password, ok := rawEvent["password"].(string); ok {
-		event.Password = password
-	}
-	if input, ok := rawEvent["input"].(string); ok {
-		event.Input = input
-	}
+
+	// Extract message
 	if message, ok := rawEvent["message"].(string); ok {
-		event.Message = message
+		event.Message = &message
 	}
-	if success, ok := rawEvent["success"].(bool); ok {
-		event.Success = &success
+
+	// Convert other fields to metadata
+	for key, value := range rawEvent {
+		if key == "eventid" || key == "message" {
+			continue
+		}
+		switch v := value.(type) {
+		case string:
+			event.Metadata[key] = v
+		case float64:
+			event.Metadata[key] = fmt.Sprintf("%v", v)
+		case bool:
+			event.Metadata[key] = fmt.Sprintf("%v", v)
+		}
 	}
 
 	return event

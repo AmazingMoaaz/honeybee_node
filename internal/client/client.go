@@ -310,10 +310,10 @@ func (nc *NodeClient) eventLoop() error {
 	// Start message reader
 	go nc.readMessages(errorChan)
 
-	// Get honeypot event channel if available
-	var honeypotEvents <-chan *protocol.HoneypotEvent
+	// Get pot (honeypot) event channel if available
+	var potEvents <-chan *protocol.PotEvent
 	if nc.honeypotMgr != nil {
-		honeypotEvents = nc.honeypotMgr.EventChannel()
+		potEvents = nc.honeypotMgr.EventChannel()
 	}
 
 	// Main loop
@@ -329,10 +329,10 @@ func (nc *NodeClient) eventLoop() error {
 			}
 			logger.Debug("Heartbeat sent")
 
-		case event, ok := <-honeypotEvents:
+		case event, ok := <-potEvents:
 			if ok && event != nil {
-				if err := nc.sendHoneypotEvent(event); err != nil {
-					logger.Errorf("Failed to send honeypot event: %v", err)
+				if err := nc.sendPotEvent(event); err != nil {
+					logger.Errorf("Failed to send pot event: %v", err)
 				}
 			}
 
@@ -371,112 +371,211 @@ func (nc *NodeClient) handleMessage(envelope *protocol.MessageEnvelope) error {
 			envelope.Version, constants.ProtocolVersion)
 	}
 
-	// Handle NodeCommand
+	// Handle NodeCommand with NodeCommandType
 	if cmd := envelope.Message.NodeCommand; cmd != nil {
-		logger.Infof("Received command: %s", cmd.Command)
-
-		switch cmd.Command {
-		case "stop":
-			nc.sendStatusUpdate(protocol.NodeStatusStopped)
-			nc.sendEvent(protocol.NewStoppedEvent())
-			go func() {
-				time.Sleep(100 * time.Millisecond)
-				nc.Stop()
-			}()
-
-		case "status":
-			nc.sendStatusUpdate(protocol.NodeStatusRunning)
-
-		case "restart":
-			logger.Info("Restart command received")
-			nc.sendStatusUpdate(protocol.NodeStatusStopped)
-			time.Sleep(500 * time.Millisecond)
-			nc.sendStatusUpdate(protocol.NodeStatusRunning)
-			nc.sendEvent(protocol.NewStartedEvent())
-
-		default:
-			logger.Warnf("Unknown command: %s", cmd.Command)
-			nc.sendEvent(protocol.NewErrorEvent(fmt.Sprintf("Unknown command: %s", cmd.Command)))
-		}
-	}
-
-	// Handle InstallHoneypot command
-	if cmd := envelope.Message.InstallHoneypot; cmd != nil {
-		logger.Infof("Received InstallHoneypot command: %s from %s", cmd.HoneypotID, cmd.GitURL)
-		nc.handleInstallHoneypot(cmd)
-	}
-
-	// Handle StartHoneypot command
-	if cmd := envelope.Message.StartHoneypot; cmd != nil {
-		logger.Infof("Received StartHoneypot command: %s", cmd.HoneypotID)
-		nc.handleStartHoneypot(cmd)
-	}
-
-	// Handle StopHoneypot command
-	if cmd := envelope.Message.StopHoneypot; cmd != nil {
-		logger.Infof("Received StopHoneypot command: %s", cmd.HoneypotID)
-		nc.handleStopHoneypot(cmd)
+		nc.handleNodeCommand(cmd)
 	}
 
 	return nil
 }
 
-// handleInstallHoneypot handles the InstallHoneypot command
-func (nc *NodeClient) handleInstallHoneypot(cmd *protocol.InstallHoneypotCmd) {
+// handleNodeCommand handles all node commands from the server
+func (nc *NodeClient) handleNodeCommand(cmd *protocol.NodeCommand) {
+	cmdType := &cmd.Command
+	cmdName := cmdType.GetCommandName()
+	logger.Infof("Received command: %s", cmdName)
+
+	switch {
+	case cmdType.Restart != nil:
+		logger.Info("Restart command received")
+		nc.sendStatusUpdate(protocol.NodeStatusStopped)
+		time.Sleep(500 * time.Millisecond)
+		nc.sendStatusUpdate(protocol.NodeStatusRunning)
+		nc.sendEvent(protocol.NewStartedEvent())
+
+	case cmdType.UpdateConfig != nil:
+		logger.Info("UpdateConfig command received")
+		nc.sendEvent(protocol.NewErrorEvent("UpdateConfig not yet implemented"))
+
+	case cmdType.InstallPot != nil:
+		logger.Infof("InstallPot command: %s (type: %s)", cmdType.InstallPot.PotID, cmdType.InstallPot.HoneypotType)
+		nc.handleInstallPot(cmdType.InstallPot)
+
+	case cmdType.DeployPot != nil:
+		potID := *cmdType.DeployPot
+		logger.Infof("DeployPot command: %s", potID)
+		nc.handleStartPot(potID)
+
+	case cmdType.GetPotStatus != nil:
+		potID := *cmdType.GetPotStatus
+		logger.Infof("GetPotStatus command: %s", potID)
+		nc.handleGetPotStatus(potID)
+
+	case cmdType.RestartPot != nil:
+		potID := *cmdType.RestartPot
+		logger.Infof("RestartPot command: %s", potID)
+		nc.handleRestartPot(potID)
+
+	case cmdType.StopPot != nil:
+		potID := *cmdType.StopPot
+		logger.Infof("StopPot command: %s", potID)
+		nc.handleStopPot(potID)
+
+	case cmdType.GetPotLogs != nil:
+		potID := *cmdType.GetPotLogs
+		logger.Infof("GetPotLogs command: %s", potID)
+		nc.sendEvent(protocol.NewErrorEvent("GetPotLogs not yet implemented"))
+
+	case cmdType.GetPotMetrics != nil:
+		potID := *cmdType.GetPotMetrics
+		logger.Infof("GetPotMetrics command: %s", potID)
+		nc.sendEvent(protocol.NewErrorEvent("GetPotMetrics not yet implemented"))
+
+	case cmdType.GetPotInfo != nil:
+		potID := *cmdType.GetPotInfo
+		logger.Infof("GetPotInfo command: %s", potID)
+		nc.handleGetPotStatus(potID) // Same as GetPotStatus for now
+
+	case cmdType.GetInstalledPots != nil:
+		logger.Info("GetInstalledPots command")
+		nc.handleGetInstalledPots()
+
+	default:
+		logger.Warnf("Unknown command type: %s", cmdName)
+		nc.sendEvent(protocol.NewErrorEvent(fmt.Sprintf("Unknown command: %s", cmdName)))
+	}
+}
+
+// handleInstallPot handles the InstallPot command
+func (nc *NodeClient) handleInstallPot(cmd *protocol.InstallPot) {
 	if nc.honeypotMgr == nil {
 		logger.Error("Honeypot manager not enabled")
 		nc.sendEvent(protocol.NewErrorEvent("Honeypot manager not enabled"))
 		return
 	}
 
-	// Set default ports from config if not specified
-	if cmd.SSHPort == 0 {
-		cmd.SSHPort = nc.cfg.Honeypot.DefaultSSH
+	// Add default ports to config if not specified
+	if cmd.Config == nil {
+		cmd.Config = make(map[string]string)
 	}
-	if cmd.TelnetPort == 0 {
-		cmd.TelnetPort = nc.cfg.Honeypot.DefaultTel
+	if _, ok := cmd.Config["ssh_port"]; !ok {
+		cmd.Config["ssh_port"] = fmt.Sprintf("%d", nc.cfg.Honeypot.DefaultSSH)
+	}
+	if _, ok := cmd.Config["telnet_port"]; !ok {
+		cmd.Config["telnet_port"] = fmt.Sprintf("%d", nc.cfg.Honeypot.DefaultTel)
 	}
 
-	if err := nc.honeypotMgr.InstallHoneypot(cmd); err != nil {
-		logger.Errorf("Failed to install honeypot: %v", err)
-		nc.sendEvent(protocol.NewErrorEvent(fmt.Sprintf("Failed to install honeypot: %v", err)))
+	if err := nc.honeypotMgr.InstallPot(cmd); err != nil {
+		logger.Errorf("Failed to install pot: %v", err)
+		nc.sendEvent(protocol.NewErrorEvent(fmt.Sprintf("Failed to install pot: %v", err)))
 	}
 }
 
-// handleStartHoneypot handles the StartHoneypot command
-func (nc *NodeClient) handleStartHoneypot(cmd *protocol.StartHoneypotCmd) {
+// handleStartPot handles starting a pot (honeypot)
+func (nc *NodeClient) handleStartPot(potID string) {
 	if nc.honeypotMgr == nil {
 		logger.Error("Honeypot manager not enabled")
 		nc.sendEvent(protocol.NewErrorEvent("Honeypot manager not enabled"))
 		return
 	}
 
-	if err := nc.honeypotMgr.StartHoneypot(cmd.HoneypotID); err != nil {
-		logger.Errorf("Failed to start honeypot: %v", err)
-		nc.sendEvent(protocol.NewErrorEvent(fmt.Sprintf("Failed to start honeypot: %v", err)))
+	if err := nc.honeypotMgr.StartHoneypot(potID); err != nil {
+		logger.Errorf("Failed to start pot: %v", err)
+		nc.sendEvent(protocol.NewErrorEvent(fmt.Sprintf("Failed to start pot: %v", err)))
 	}
 }
 
-// handleStopHoneypot handles the StopHoneypot command
-func (nc *NodeClient) handleStopHoneypot(cmd *protocol.StopHoneypotCmd) {
+// handleStopPot handles stopping a pot (honeypot)
+func (nc *NodeClient) handleStopPot(potID string) {
 	if nc.honeypotMgr == nil {
 		logger.Error("Honeypot manager not enabled")
 		nc.sendEvent(protocol.NewErrorEvent("Honeypot manager not enabled"))
 		return
 	}
 
-	if err := nc.honeypotMgr.StopHoneypot(cmd.HoneypotID); err != nil {
-		logger.Errorf("Failed to stop honeypot: %v", err)
-		nc.sendEvent(protocol.NewErrorEvent(fmt.Sprintf("Failed to stop honeypot: %v", err)))
+	if err := nc.honeypotMgr.StopHoneypot(potID); err != nil {
+		logger.Errorf("Failed to stop pot: %v", err)
+		nc.sendEvent(protocol.NewErrorEvent(fmt.Sprintf("Failed to stop pot: %v", err)))
 	}
 }
 
-// sendHoneypotEvent sends a honeypot event to the server
-func (nc *NodeClient) sendHoneypotEvent(event *protocol.HoneypotEvent) error {
+// handleRestartPot handles restarting a pot (honeypot)
+func (nc *NodeClient) handleRestartPot(potID string) {
+	if nc.honeypotMgr == nil {
+		logger.Error("Honeypot manager not enabled")
+		nc.sendEvent(protocol.NewErrorEvent("Honeypot manager not enabled"))
+		return
+	}
+
+	// Stop then start
+	if err := nc.honeypotMgr.StopHoneypot(potID); err != nil {
+		logger.Warnf("Error stopping pot for restart: %v", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+	if err := nc.honeypotMgr.StartHoneypot(potID); err != nil {
+		logger.Errorf("Failed to restart pot: %v", err)
+		nc.sendEvent(protocol.NewErrorEvent(fmt.Sprintf("Failed to restart pot: %v", err)))
+	}
+}
+
+// handleGetPotStatus handles getting the status of a pot
+func (nc *NodeClient) handleGetPotStatus(potID string) {
+	if nc.honeypotMgr == nil {
+		logger.Error("Honeypot manager not enabled")
+		nc.sendEvent(protocol.NewErrorEvent("Honeypot manager not enabled"))
+		return
+	}
+
+	status, err := nc.honeypotMgr.GetStatus(potID)
+	if err != nil {
+		logger.Errorf("Failed to get pot status: %v", err)
+		nc.sendEvent(protocol.NewErrorEvent(fmt.Sprintf("Failed to get pot status: %v", err)))
+		return
+	}
+
+	nc.sendPotStatusUpdate(status)
+}
+
+// handleGetInstalledPots handles getting the list of installed pots
+func (nc *NodeClient) handleGetInstalledPots() {
+	if nc.honeypotMgr == nil {
+		logger.Error("Honeypot manager not enabled")
+		nc.sendEvent(protocol.NewErrorEvent("Honeypot manager not enabled"))
+		return
+	}
+
+	pots := nc.honeypotMgr.ListPots()
+	for _, pot := range pots {
+		nc.sendPotStatusUpdate(pot)
+	}
+}
+
+// sendPotEvent sends a pot (honeypot) event to the server
+func (nc *NodeClient) sendPotEvent(event *protocol.PotEvent) error {
+	// Convert PotEvent to PotStatusUpdate for sending via message envelope
+	// The core expects PotStatusUpdate messages for status updates
 	envelope := protocol.MessageEnvelope{
 		Version: constants.ProtocolVersion,
 		Message: protocol.MessageType{
-			HoneypotEvent: event,
+			PotStatusUpdate: &protocol.PotStatusUpdate{
+				NodeID:  event.NodeID,
+				PotID:   event.PotID,
+				PotType: event.Metadata["pot_type"],
+				Status:  protocol.PotStatus(event.Metadata["status"]),
+				Message: event.Message,
+			},
+		},
+	}
+
+	return nc.sendMessage(envelope)
+}
+
+// sendPotStatusUpdate sends a pot status update to the server
+func (nc *NodeClient) sendPotStatusUpdate(status *protocol.PotStatusUpdate) error {
+	envelope := protocol.MessageEnvelope{
+		Version: constants.ProtocolVersion,
+		Message: protocol.MessageType{
+			PotStatusUpdate: status,
 		},
 	}
 
@@ -540,11 +639,10 @@ func (nc *NodeClient) sendEvent(event *protocol.NodeEvent) error {
 func (nc *NodeClient) sendNodeDrop() error {
 	logger.Info("Sending NodeDrop")
 
-	dropFlag := true
 	envelope := protocol.MessageEnvelope{
 		Version: constants.ProtocolVersion,
 		Message: protocol.MessageType{
-			NodeDrop: &dropFlag,
+			NodeDrop: &struct{}{},
 		},
 	}
 
