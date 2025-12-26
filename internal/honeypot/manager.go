@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -268,6 +269,8 @@ func (hm *HoneypotManager) setupHoneypot(instance *HoneypotInstance, config map[
 	switch instance.Type {
 	case "cowrie":
 		return hm.setupCowrie(instance, config)
+	case "honnypotter":
+		return hm.setupHonnyPotter(instance, config)
 	case "dionaea":
 		return hm.setupDionaea(instance, config)
 	case "heralding":
@@ -430,6 +433,70 @@ func (hm *HoneypotManager) setupMailoney(instance *HoneypotInstance, config map[
 	return hm.setupGenericPython(instance, config)
 }
 
+// setupHonnyPotter sets up HonnyPotter WordPress honeypot
+func (hm *HoneypotManager) setupHonnyPotter(instance *HoneypotInstance, config map[string]string) error {
+	logger.Info("Setting up HonnyPotter honeypot...")
+
+	// Get pot ID from config or use instance ID
+	potID := instance.ID
+	if id, ok := config["pot_id"]; ok && id != "" {
+		potID = id
+	}
+
+	// Create logs directory
+	logDir := filepath.Join(instance.InstallPath, "logs")
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		return fmt.Errorf("failed to create logs directory: %w", err)
+	}
+
+	// Verify PHP is available
+	phpCmd := "php"
+	if runtime.GOOS == "windows" {
+		phpCmd = "php.exe"
+	}
+
+	// Check if PHP is installed
+	phpCheckCmd := exec.CommandContext(hm.ctx, phpCmd, "-v")
+	if err := phpCheckCmd.Run(); err != nil {
+		logger.Warnf("PHP not found in PATH, HonnyPotter may require manual PHP setup")
+	}
+
+	// Verify required PHP extensions
+	extensions := []string{"json", "sockets"}
+	for _, ext := range extensions {
+		extCheckCmd := exec.CommandContext(hm.ctx, phpCmd, "-m")
+		output, _ := extCheckCmd.Output()
+		if !strings.Contains(strings.ToLower(string(output)), strings.ToLower(ext)) {
+			logger.Warnf("PHP extension '%s' may not be available", ext)
+		}
+	}
+
+	// Set default HTTP port if not specified
+	httpPort := uint16(80)
+	if portStr, ok := config["http_port"]; ok && portStr != "" {
+		if port, err := parsePort(portStr); err == nil {
+			httpPort = port
+		}
+	}
+
+	logger.Infof("HonnyPotter setup complete. Pot ID: %s, HTTP Port: %d", potID, httpPort)
+	return nil
+}
+
+
+// parsePort parses a port string to uint16
+func parsePort(portStr string) (uint16, error) {
+	var port uint16
+	_, err := fmt.Sscanf(portStr, "%d", &port)
+	if err != nil {
+		return 0, fmt.Errorf("invalid port: %w", err)
+	}
+	if port == 0 {
+		return 0, fmt.Errorf("port cannot be 0")
+	}
+	return port, nil
+}
+
 // setupGenericPython sets up a generic Python-based honeypot
 func (hm *HoneypotManager) setupGenericPython(instance *HoneypotInstance, config map[string]string) error {
 	logger.Infof("Setting up generic Python honeypot: %s", instance.Type)
@@ -500,6 +567,8 @@ func (hm *HoneypotManager) StartHoneypot(honeypotID string) error {
 	switch instance.Type {
 	case "cowrie":
 		return hm.startCowrie(instance)
+	case "honnypotter":
+		return hm.startHonnyPotter(instance)
 	default:
 		// Try generic Python start
 		return hm.startGenericPython(instance)
@@ -634,6 +703,80 @@ func (hm *HoneypotManager) startCowrie(instance *HoneypotInstance) error {
 	logger.Infof("Cowrie honeypot %s started on SSH:%d, Telnet:%d",
 		instance.ID, instance.SSHPort, instance.TelnetPort)
 
+	return nil
+}
+
+// startHonnyPotter starts the HonnyPotter WordPress honeypot
+func (hm *HoneypotManager) startHonnyPotter(instance *HoneypotInstance) error {
+	logger.Infof("Starting HonnyPotter honeypot %s", instance.ID)
+
+	// Determine PHP command
+	phpCmd := "php"
+	if runtime.GOOS == "windows" {
+		phpCmd = "php.exe"
+	}
+
+	// Default HTTP port (can be overridden via environment or config file)
+	httpPort := "8080"
+
+	// Get pot ID from instance
+	potID := instance.ID
+
+	// Entry point - prefer standalone.php, fallback to wp-login.php
+	entryPoint := filepath.Join(instance.InstallPath, "standalone.php")
+	if _, err := os.Stat(entryPoint); os.IsNotExist(err) {
+		entryPoint = filepath.Join(instance.InstallPath, "wp-login.php")
+		if _, err := os.Stat(entryPoint); os.IsNotExist(err) {
+			return fmt.Errorf("no entry point found for HonnyPotter (checked standalone.php and wp-login.php)")
+		}
+	}
+
+	// Create context for the process
+	ctx, cancel := context.WithCancel(hm.ctx)
+	instance.cancelFunc = cancel
+
+	// Set environment variables for HoneyBee integration
+	env := os.Environ()
+	env = append(env, fmt.Sprintf("HONEYBEE_POT_ID=%s", potID))
+	env = append(env, "HONEYBEE_ENABLE=true")
+	env = append(env, "HONEYBEE_ENABLE_FILE_LOG=true")
+	env = append(env, fmt.Sprintf("HONEYBEE_LOG_FILE=%s", filepath.Join(instance.InstallPath, "logs", "honnypotter.log")))
+
+	// Start PHP built-in server
+	// php -S 0.0.0.0:8080 -t . standalone.php
+	cmd := exec.CommandContext(ctx, phpCmd, "-S", fmt.Sprintf("0.0.0.0:%s", httpPort), "-t", instance.InstallPath, entryPoint)
+	cmd.Dir = instance.InstallPath
+	cmd.Env = env
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return fmt.Errorf("failed to start HonnyPotter: %w", err)
+	}
+
+	instance.Process = cmd
+	instance.Status = protocol.PotStatusRunning
+	hm.sendStatusUpdate(instance, fmt.Sprintf("HonnyPotter started on port %s", httpPort))
+
+	// Monitor process in background
+	go func() {
+		err := cmd.Wait()
+		instance.mu.Lock()
+		if instance.Status == protocol.PotStatusRunning {
+			if err != nil {
+				logger.Errorf("HonnyPotter process exited with error: %v", err)
+				instance.Status = protocol.PotStatusFailed
+				hm.sendStatusUpdate(instance, fmt.Sprintf("Process exited: %v", err))
+			} else {
+				instance.Status = protocol.PotStatusStopped
+				hm.sendStatusUpdate(instance, "Process exited normally")
+			}
+		}
+		instance.mu.Unlock()
+	}()
+
+	logger.Infof("HonnyPotter honeypot %s started on port %s", instance.ID, httpPort)
 	return nil
 }
 
