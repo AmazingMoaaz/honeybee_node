@@ -2,7 +2,7 @@
 
 [![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go)](https://go.dev/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Protocol](https://img.shields.io/badge/Protocol-v2-green.svg)](https://github.com/H0neyBe/honeybee)
+[![Protocol](https://img.shields.io/badge/Protocol-v2-green.svg)](https://github.com/H0neyBe/honeybee_node)
 [![Status](https://img.shields.io/badge/Status-Beta-orange)](https://github.com/H0neyBe/honeybee_node)
 
 A Go implementation of a HoneyBee node that connects to the HoneyBee Core manager, manages honeypot deployments, and forwards attack data in real-time. Features TLS 1.3 encryption, TOTP authentication, automatic honeypot installation, and comprehensive event forwarding. Currently in **Beta** - active development and testing.
@@ -549,8 +549,8 @@ All messages are JSON-encoded and sent over TCP with optional TLS encryption.
 
 ```bash
 # Clone repository
-git clone https://github.com/H0neyBe/honeybee.git
-cd honeybee/honeybee_node
+git clone https://github.com/H0neyBe/honeybee_node.git
+cd honeybee_node
 
 # Download dependencies
 go mod download
@@ -612,7 +612,7 @@ See [LICENSE](./LICENSE) file for details.
 
 - 📖 **Documentation**: Check the configuration file comments for detailed options
 - 🐛 **Issues**: [Report bugs or request features](https://github.com/H0neyBe/honeybee_node/issues)
-- 💬 **Discussions**: [Join discussions](https://github.com/H0neyBe/honeybee/discussions) for questions and help
+- 💬 **Discussions**: [Join discussions](https://github.com/H0neyBe/honeybee_node/discussions) for questions and help
 - 📚 **Documentation Site**: [HoneyBee Documentation](https://h0neybe.github.io/bee_docs/)
 - 🔗 **Repository**: [HoneyBee Node on GitHub](https://github.com/H0neyBe/honeybee_node)
 
@@ -620,4 +620,4 @@ See [LICENSE](./LICENSE) file for details.
 
 **Status**: 🧪 Beta | **Version**: 1.0.0 | **Protocol**: v2
 
-For more information, visit the [HoneyBee Documentation](https://h0neybe.github.io/bee_docs/) or the [main repository](https://github.com/H0neyBe/honeybee).
+For more information, visit the [HoneyBee Documentation](https://h0neybe.github.io/bee_docs/).
