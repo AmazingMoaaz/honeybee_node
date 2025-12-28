@@ -3,8 +3,31 @@
 [![Go Version](https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go)](https://go.dev/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Protocol](https://img.shields.io/badge/Protocol-v2-green.svg)](https://github.com/H0neyBe/honeybee)
+[![Status](https://img.shields.io/badge/Status-Beta-orange)](https://github.com/H0neyBe/honeybee_node)
 
-A production-ready Go implementation of a HoneyBee node that connects to the HoneyBee Core manager, manages honeypot deployments, and forwards attack data in real-time. Features TLS 1.3 encryption, TOTP authentication, automatic honeypot installation, and comprehensive event forwarding.
+A Go implementation of a HoneyBee node that connects to the HoneyBee Core manager, manages honeypot deployments, and forwards attack data in real-time. Features TLS 1.3 encryption, TOTP authentication, automatic honeypot installation, and comprehensive event forwarding. Currently in **Beta** - active development and testing.
+
+## Table of Contents
+
+- [Features](#features)
+- [Quick Start](#quick-start)
+- [Configuration](#configuration)
+- [Node Types](#node-types)
+- [Command Line Options](#command-line-options)
+- [Supported Honeypots](#supported-honeypots)
+- [Honeypot Management](#honeypot-management)
+- [Project Structure](#project-structure)
+- [Makefile Commands](#makefile-commands)
+- [Deployment](#deployment)
+- [Security](#security)
+- [Protocol](#protocol)
+- [Requirements](#requirements)
+- [Troubleshooting](#troubleshooting)
+- [Development](#development)
+- [Contributing](#contributing)
+- [License](#license)
+- [Related Projects](#related-projects)
+- [Support](#support)
 
 ## Features
 
@@ -14,7 +37,7 @@ A production-ready Go implementation of a HoneyBee node that connects to the Hon
 🔄 **Auto Reconnection** - Automatic reconnection with exponential backoff  
 📊 **Structured Logging** - JSON and text logging with logrus  
 🌐 **Multi-Platform** - Linux, Windows, and macOS support  
-🚀 **Production Ready** - Graceful shutdown, error recovery, and monitoring  
+🚀 **Beta Release** - Graceful shutdown, error recovery, and monitoring (actively tested)  
 
 ## Quick Start
 
@@ -238,9 +261,29 @@ Once connected to the manager, honeypots can be installed and managed remotely:
 ### Event Forwarding
 
 All honeypot events (login attempts, commands, attacks) are automatically forwarded to the HoneyBee Core manager via:
-- **TCP Socket** - Events sent to `localhost:9100` (configurable)
+- **TCP Socket** - Events sent to `localhost:9100` (configurable via `HONEYBEE_EVENT_PORT`)
 - **JSON Format** - Structured event data with metadata
 - **Real-time** - Events forwarded immediately as they occur
+
+#### Event Format
+
+Events are sent as JSON messages with the following structure:
+
+```json
+{
+  "node_id": 12345,
+  "pot_id": "cowrie-01",
+  "pot_type": "cowrie",
+  "event_type": "login",
+  "timestamp": "2024-01-15T10:30:00Z",
+  "data": {
+    "username": "admin",
+    "password": "password123",
+    "ip": "192.168.1.100",
+    "session": "abc123"
+  }
+}
+```
 
 ## Project Structure
 
@@ -448,17 +491,57 @@ All messages are JSON-encoded and sent over TCP with optional TLS encryption.
 ### Honeypot Installation Fails
 
 1. **Check Python/PHP** - Ensure required runtime is installed
+   ```bash
+   python3 --version  # Should be 3.7+
+   php --version      # Should be 7.4+ (for PHP honeypots)
+   ```
+
 2. **Check Git** - Ensure Git is available
+   ```bash
+   git --version
+   ```
+
 3. **Check disk space** - Ensure sufficient space for installations
+   ```bash
+   df -h ~/.honeybee/honeypots
+   ```
+
 4. **Check permissions** - Ensure write access to `honeypot.base_dir`
+   ```bash
+   ls -la ~/.honeybee/honeypots
+   ```
+
 5. **Check logs** - Review installation logs for errors
+   ```bash
+   ./build/honeybee-node -config configs/config.yaml -debug
+   ```
 
 ### Events Not Forwarding
 
 1. **Check event listener** - Verify port 9100 is available
+   ```bash
+   netstat -tuln | grep 9100  # Linux
+   netstat -an | grep 9100    # macOS/Windows
+   ```
+
 2. **Check honeypot config** - Ensure HoneyBee forwarder is configured
+   - For Cowrie: Check `honeybee.py` output plugin is enabled
+   - For HonnyPotter: Check `honeybee-forwarder.php` is included
+
 3. **Check network** - Verify honeypot can reach localhost:9100
-4. **Check logs** - Enable debug logging to see event flow
+   ```bash
+   telnet localhost 9100  # Should connect
+   ```
+
+4. **Check environment variables** - Verify `HONEYBEE_EVENT_PORT` is set correctly
+   ```bash
+   echo $HONEYBEE_EVENT_PORT  # Should be 9100
+   ```
+
+5. **Check logs** - Enable debug logging to see event flow
+   ```bash
+   ./build/honeybee-node -config configs/config.yaml -debug
+   ```
 
 ## Development
 
@@ -489,13 +572,32 @@ make test
 
 ## Contributing
 
-Contributions are welcome! Please:
+Contributions are welcome! We appreciate your help in making HoneyBee Node better.
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
+### How to Contribute
+
+1. **Fork the repository** - Create your own fork of [honeybee_node](https://github.com/H0neyBe/honeybee_node)
+2. **Create a feature branch** - Use a descriptive branch name (e.g., `feature/add-new-honeypot-support`)
+3. **Make your changes** - Follow the existing code style and add tests
+4. **Test your changes** - Run `make test` to ensure everything works
+5. **Submit a pull request** - Provide a clear description of your changes
+
+### Development Guidelines
+
+- Follow Go best practices and conventions
+- Add tests for new features
+- Update documentation as needed
+- Ensure all tests pass before submitting
+- Use meaningful commit messages
+
+### Areas for Contribution
+
+- 🐛 Bug fixes
+- ✨ New features
+- 📚 Documentation improvements
+- 🧪 Test coverage
+- 🎨 Code quality improvements
+- 🌐 Additional honeypot support
 
 ## License
 
@@ -503,17 +605,19 @@ See [LICENSE](./LICENSE) file for details.
 
 ## Related Projects
 
-- **[HoneyBee Core](../honeybee_core)** - Central manager (Rust)
-- **[HoneyBee Potstore](../honeybee_potstore)** - Honeypot repository and registry
+- **[HoneyBee Core](https://github.com/H0neyBe/honeybee_core)** - Central manager (Rust)
+- **[HoneyBee Potstore](https://github.com/H0neyBe/honeybee_potstore)** - Honeypot repository and registry
 
 ## Support
 
-- 📖 Check the configuration file comments for detailed options
-- 🐛 Report issues on GitHub
-- 💬 Join discussions for questions and help
+- 📖 **Documentation**: Check the configuration file comments for detailed options
+- 🐛 **Issues**: [Report bugs or request features](https://github.com/H0neyBe/honeybee_node/issues)
+- 💬 **Discussions**: [Join discussions](https://github.com/H0neyBe/honeybee/discussions) for questions and help
+- 📚 **Documentation Site**: [HoneyBee Documentation](https://h0neybe.github.io/bee_docs/)
+- 🔗 **Repository**: [HoneyBee Node on GitHub](https://github.com/H0neyBe/honeybee_node)
 
 ---
 
-**Status**: ✅ Production Ready | **Version**: 1.0.0 | **Protocol**: v2
+**Status**: 🧪 Beta | **Version**: 1.0.0 | **Protocol**: v2
 
-For more information, visit the [HoneyBee repository](https://github.com/H0neyBe/honeybee).
+For more information, visit the [HoneyBee Documentation](https://h0neybe.github.io/bee_docs/) or the [main repository](https://github.com/H0neyBe/honeybee).
